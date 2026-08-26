@@ -9,7 +9,7 @@ tools = [
         "type": "function",
         "function": {
             "name": "bash",
-            "description": "执行只读安全的系统shell命令。包括ls、grep、cat等，禁止破坏性操作",
+            "description": "执行只读安全的系统shell命令。包括ls、grep、cat等，禁止破坏性操作，只能当前目录下进行操作",
             "parameters": {"type": "object", "properties": {"command": {"type": "string"}}}
         }
     },
@@ -29,7 +29,7 @@ system_prompt = "你是一个编程助手。获取信息时请调用工具。解
 # 初始化消息历史
 messages = [
     {"role": "system", "content": system_prompt},
-    {"role": "user", "content": "请帮我查看当前目录下有哪些Python文件，并读出最大的那个文件的前10行。"}
+    {"role": "user", "content": "请帮我查看当前目录下有哪些文件，并读出最大的那个文件的前10行。"}
 ]
 
 # 2. 核心无限循环（这就是 Claude Code 最底层的闭环）
