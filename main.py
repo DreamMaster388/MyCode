@@ -1,97 +1,85 @@
-import json
-from openai import OpenAI  # 假设使用OpenAI格式的API，或兼容Anthropic
+"""主入口：启动基于 HelloAgents 框架的编码助手（简单交互式，多轮）。
 
-client = OpenAI(base_url="https://api.deepseek.com", api_key="sk-1895391e5899440098fc83ccbf6b687a")
+用法：
+    python main.py
+    python -m agents        # 等价
 
-# 1. 定义最简单的两个工具Schema
-tools = [
-    {
-        "type": "function",
-        "function": {
-            "name": "bash",
-            "description": "执行只读安全的系统shell命令。包括ls、grep、cat等，禁止破坏性操作，只能当前目录下进行操作",
-            "parameters": {"type": "object", "properties": {"command": {"type": "string"}}}
-        }
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "read_file",
-            "description": "读取项目中的文本文件内容",
-            "parameters": {"type": "object", "properties": {"path": {"type": "string"}}}
-        }
-    }
-]
+首次使用：cp .env.example .env 并填入 LLM_API_KEY 等。
+"""
+import sys
 
-# 系统提示词（极简版，告诉AI它是编程助手）
-system_prompt = "你是一个编程助手。获取信息时请调用工具。解决问题后，直接输出最终答案。"
+from dotenv import load_dotenv
 
-# 初始化消息历史
-messages = [
-    {"role": "system", "content": system_prompt},
-    {"role": "user", "content": "请帮我查看当前目录下有哪些文件，并读出最大的那个文件的前10行。"}
-]
+load_dotenv()
 
-# 2. 核心无限循环（这就是 Claude Code 最底层的闭环）
-max_iterations = 10  # 防止死循环
-while max_iterations > 0:
-    max_iterations -= 1
+from agents.core.llm import HelloAgentsLLM
+from agents.core.config import Config
+from agents.agent.simple_agent import SimpleAgent
+from agents.tools.registry import ToolRegistry
+from agents.tools.builtin import ReadTool, WriteTool, EditTool
 
-    # --- 步骤A：思考 (Think) ---
-    response = client.chat.completions.create(
-        model="deepseek-v4-flash",  # 或 claude-3
-        messages=messages,
-        tools=tools,
-        tool_choice="auto"  # 让AI自己决定是否调用工具
+
+SYSTEM_PROMPT = """你是一个编程助手，运行在用户的本地工作目录中。
+
+你可以通过以下工具完成任务：
+- Read：读取文件内容，或列出目录内容
+- Write：创建/覆盖文件（带冲突检测与备份）
+- Edit：精确替换文件中的内容（带冲突检测与备份）
+
+工作准则：
+1. 动手前先用 Read 了解相关文件，不要凭空猜测代码。
+2. 修改文件优先用 Edit（精确替换），仅在新建文件时才用 Write。
+3. 保持回答简洁，直接给出结论与必要的代码片段。
+"""
+
+
+def build_agent() -> SimpleAgent:
+    """构造编码助手 Agent（不发起任何网络请求）。"""
+    llm = HelloAgentsLLM()
+    registry = ToolRegistry()
+    for tool in (
+        ReadTool(project_root="."),
+        WriteTool(project_root="."),
+        EditTool(project_root="."),
+    ):
+        registry.register_tool(tool)
+
+    config = Config(
+        trace_enabled=False,
+        skills_enabled=False,
+        session_enabled=False,
+        devlog_enabled=False,
+        todowrite_enabled=False,
+    )
+    return SimpleAgent(
+        name="CodingAgent",
+        llm=llm,
+        tool_registry=registry,
+        system_prompt=SYSTEM_PROMPT,
+        config=config,
     )
 
-    # 获取模型回复
-    assistant_message = response.choices[0].message
-    messages.append(assistant_message)  # 将思考结果存入历史
 
-    # --- 步骤B：检查是否有工具调用请求 ---
-    if assistant_message.tool_calls is None:
-        # 没有工具调用，说明AI认为任务已完成，直接输出最终结果，闭环结束
-        print("【完成】", assistant_message.content)
-        break
+def main() -> None:
+    agent = build_agent()
+    print("=== 编码助手已启动（输入 exit / quit 退出，Ctrl+C 中断）===")
+    while True:
+        try:
+            text = input("\n你> ").strip()
+        except (EOFError, KeyboardInterrupt):
+            print("\n再见。")
+            break
+        if not text:
+            continue
+        if text.lower() in ("exit", "quit"):
+            break
+        try:
+            answer = agent.run(text)
+        except Exception as exc:  # 单轮出错不退出，继续对话
+            print(f"\n[错误] {exc}")
+            continue
+        print(f"\nAgent> {answer}")
 
-    # --- 步骤C：行动 (Act) & 观察 (Observe) ---
-    # 遍历AI请求的所有工具
-    for tool_call in assistant_message.tool_calls:
-        tool_name = tool_call.function.name
-        arguments = json.loads(tool_call.function.arguments)
 
-        # 执行具体工具
-        if tool_name == "bash":
-            import subprocess
-
-            try:
-                result = subprocess.check_output(
-                    arguments["command"], shell=True, text=True, stderr=subprocess.STDOUT
-                )
-            except Exception as e:
-                result = f"命令执行失败: {e}"
-
-        elif tool_name == "read_file":
-            try:
-                with open(arguments["path"], "r", encoding="utf-8") as f:
-                    result = f.read()
-            except Exception as e:
-                result = f"读取文件失败: {e}"
-
-        else:
-            result = "未知工具"
-
-        # --- 将观察（Observe）结果返回给AI ---
-        # 注意：工具结果必须以 tool 角色返回，并关联上对应的 tool_call_id
-        messages.append({
-            "role": "tool",
-            "tool_call_id": tool_call.id,
-            "content": result  # 把命令的输出或文件内容塞回给模型
-        })
-
-        # 将结果打印在终端，方便人类观察闭环过程
-        print(f"【工具执行】{tool_name}: {arguments}")
-        print(f"【观察结果】{result[:200]}...")
-
-        # 此时循环进入下一轮，AI会基于刚刚的观察结果，再次决定是继续调用工具，还是输出最终答案。
+if __name__ == "__main__":
+    main()

@@ -1,23 +1,31 @@
-# Python
-__pycache__/
-*.py[cod]
-*.egg-info/
-.eggs/
-build/
-dist/
+# ── Secrets / environment ──
+.env
+**/.env
+.env.*
+!.env.example
 
-# Virtual environments
+# ── Python caches / build ──
+__pycache__/
+*.pyc
+*.pyo
 .venv/
 venv/
 env/
-
-# Secrets / environment
-.env
-.env.*
-*.pem
-*.key
-
-# Test artifacts
+build/
+dist/
+*.egg-info/
 .pytest_cache/
-.coverage
-htmlcov/
+
+# ── Framework runtime artifacts ──
+memory/
+tool-output/
+traces/
+*.bak
+.backups/
+
+# ── Editors / OS ──
+.idea/
+.vscode/
+.DS_Store
+
+test_dir/
