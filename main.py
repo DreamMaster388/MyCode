@@ -16,15 +16,12 @@ from agents.core.llm import HelloAgentsLLM
 from agents.core.config import Config
 from agents.agent.simple_agent import SimpleAgent
 from agents.tools.registry import ToolRegistry
-from agents.tools.builtin import ReadTool, WriteTool, EditTool
+from agents.tools.builtin import ReadTool, WriteTool, EditTool, BashTool, GrepTool, GlobTool
 
 
 SYSTEM_PROMPT = """你是一个编程助手，运行在用户的本地工作目录中。
 
-你可以通过以下工具完成任务：
-- Read：读取文件内容，或列出目录内容
-- Write：创建/覆盖文件（带冲突检测与备份）
-- Edit：精确替换文件中的内容（带冲突检测与备份）
+你可以通过调用各种工具完成任务
 
 工作准则：
 1. 动手前先用 Read 了解相关文件，不要凭空猜测代码。
@@ -38,9 +35,12 @@ def build_agent() -> SimpleAgent:
     llm = HelloAgentsLLM()
     registry = ToolRegistry()
     for tool in (
-        ReadTool(project_root="."),
-        WriteTool(project_root="."),
-        EditTool(project_root="."),
+        ReadTool(),
+        WriteTool(),
+        EditTool(),
+        BashTool(),
+        GrepTool(),
+        GlobTool()
     ):
         registry.register_tool(tool)
 

@@ -27,5 +27,3 @@ traces/
 .idea/
 .vscode/
 .DS_Store
-
-test_dir/

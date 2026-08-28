@@ -18,6 +18,9 @@ from .todowrite_tool import TodoWriteTool, TodoItem, TodoList
 from .devlog_tool import DevLogTool, DevLogEntry, DevLogStore, CATEGORIES
 from .task_tool import TaskTool
 from .skill_tool import SkillTool
+from .bash_tool import BashTool
+from .grep_tool import GrepTool
+from .glob_tool import GlobTool
 
 __all__ = [
     "CalculatorTool",
@@ -34,4 +37,7 @@ __all__ = [
     "CATEGORIES",
     "TaskTool",
     "SkillTool",
+    "BashTool",
+    "GrepTool",
+    "GlobTool"
 ]
