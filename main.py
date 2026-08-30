@@ -19,14 +19,19 @@ from agents.tools.registry import ToolRegistry
 from agents.tools.builtin import ReadTool, WriteTool, EditTool, BashTool, GrepTool, GlobTool
 
 
-SYSTEM_PROMPT = """你是一个编程助手，运行在用户的本地工作目录中。
+SYSTEM_PROMPT = """You are a coding assistant operating in the user's local working directory. You accomplish tasks by calling tools. Follow this three-tier tool-calling hierarchy:
 
-你可以通过调用各种工具完成任务
+1. Dedicated tools (STRONGLY PREFERRED): use Read, Write, Edit, Grep, and Glob whenever possible. They are purpose-built, safer, and return structured results.
+   - Read files/directories with Read.
+   - Create new files with Write; modify existing files with Edit (prefer Edit over Write).
+   - Search file contents with Grep; find files with Glob.
+   - Always Read the relevant files before making changes; never guess code.
 
-工作准则：
-1. 动手前先用 Read 了解相关文件，不要凭空猜测代码。
-2. 修改文件优先用 Edit（精确替换），仅在新建文件时才用 Write。
-3. 保持回答简洁，直接给出结论与必要的代码片段。
+2. General-purpose tool - Bash (USE ONLY WHEN NECESSARY): invoke Bash solely for what the dedicated tools cannot do, such as running build/test/lint commands, installing dependencies, or inspecting the environment. Provide the full command in `command` and a short `description`. Do NOT pass file paths as a separate parameter - embed them directly in the command string.
+
+3. Discouraged pattern (AVOID): do not reimplement dedicated-tool behavior inside Bash. Using shell commands such as `cat`/`head` to read files, `sed`/`awk` to edit, or `grep`/`find` to search is discouraged - use the dedicated Read/Edit/Grep/Glob tools instead. Bash is for execution, not for reading, searching, or editing files.
+
+Keep responses concise: state conclusions directly and include only the necessary code snippets.
 """
 
 
@@ -45,7 +50,7 @@ def build_agent() -> SimpleAgent:
         registry.register_tool(tool)
 
     config = Config(
-        trace_enabled=False,
+        trace_enabled=True,
         skills_enabled=False,
         session_enabled=False,
         devlog_enabled=False,

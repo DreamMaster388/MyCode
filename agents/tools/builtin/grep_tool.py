@@ -21,15 +21,15 @@ class GrepTool(Tool):
         return [
             ToolParameter(name="pattern", 
                           description="The regex pattern to search for.", 
-                          type=str, 
+                          type="string", 
                           required=True),
-            ToolParameter(name="file_path", 
-                          description="The path to the file to search in.", 
-                          type=str, 
+            ToolParameter(name="path", 
+                          description="The file or directory to search in (relative to project root). Defaults to the current directory.", 
+                          type="string", 
                           required=False),
             ToolParameter(name="glob",
                             description="Optional glob pattern to filter files (e.g., '*.py').", 
-                            type=str, 
+                            type="string", 
                             required=False)
         ]
 
@@ -52,14 +52,13 @@ class GrepTool(Tool):
             cmd.extend(["--glob", parameters["glob"]])
 
         # 设置目标路径
-        target_path = parameters.get("file_path", ".")
+        target_path = parameters.get("path", ".")
         cmd.append(target_path)
 
         import subprocess
         import os
 
         try:
-            print(f"Executing command: {' '.join(cmd)}")
             result = subprocess.run(
                 cmd,
                 capture_output=True,
@@ -93,7 +92,7 @@ class GrepTool(Tool):
             "-n",               # 显示行号
             "-H",               # 显示文件名
             pattern,
-            parameters.get("file_path", ".")
+            parameters.get("path", ".")
         ]
 
         import subprocess

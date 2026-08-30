@@ -20,9 +20,17 @@ class BashTool(Tool):
     def get_parameters(self) -> List[ToolParameter]:
         return [
             ToolParameter(name="command", 
-                          description="The bash command to execute.", 
-                          type=str, 
-                          required=True)
+                          description="The full Shell command to execute. It's recommended to use && to chain dependent commands and | to build pipelines.", 
+                          type="string", 
+                          required=True),
+            ToolParameter(name="description", 
+                            description="A brief description of what the command does.", 
+                            type="string", 
+                            required=False),
+            ToolParameter(name="timeout", 
+                        description="The maximum time (in seconds) to wait for the command to complete.", 
+                        type="integer", 
+                        required=False)
         ]
 
     def run(self, parameters: Dict[str, Any]) -> ToolResponse:
@@ -35,7 +43,7 @@ class BashTool(Tool):
 
         try:
             print(f"Executing command: {command}")
-            result = subprocess.run(command, shell=True, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+            result = subprocess.run(command, shell=True, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=parameters.get("timeout", 30))
             return ToolResponse.success(text=result.stdout)
         except subprocess.CalledProcessError as e:
             return ToolResponse.error(code=ToolErrorCode.EXECUTION_ERROR, 

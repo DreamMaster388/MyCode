@@ -21,12 +21,12 @@ class GlobTool(Tool):
     def get_parameters(self) -> List[ToolParameter]:
             return [
                 ToolParameter(name="pattern", 
-                              description="The regex pattern to search for.", 
-                              type=str, 
+                              description="Glob pattern to match (e.g. '**/*.py'). This is NOT a regex; use the grep tool for regex searches.", 
+                              type="string", 
                               required=True),
-                ToolParameter(name="org_path", 
-                              description="Starting directory to search.", 
-                              type=str, 
+                ToolParameter(name="path", 
+                              description="The starting directory to search in (relative to project root). Defaults to the current directory.", 
+                              type="string", 
                               required=False),
             ]
 
@@ -47,11 +47,10 @@ class GlobTool(Tool):
         ]
 
         # 设置目标路径
-        target_path = parameters.get("org_path", ".")
+        target_path = parameters.get("path", ".")
         cmd.append(target_path)
 
         try:
-            print(f"Executing command: {' '.join(cmd)}")
             result = subprocess.run(cmd, 
                                     check=True, 
                                     stdout=subprocess.PIPE, 
