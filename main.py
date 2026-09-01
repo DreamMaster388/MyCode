@@ -14,7 +14,7 @@ load_dotenv()
 
 from agents.core.llm import HelloAgentsLLM
 from agents.core.config import Config
-from agents.agent.simple_agent import SimpleAgent
+from agents.agent.code_agent import CodeAgent
 from agents.tools.registry import ToolRegistry
 from agents.tools.builtin import ReadTool, WriteTool, EditTool, BashTool, GrepTool, GlobTool
 
@@ -35,8 +35,7 @@ Keep responses concise: state conclusions directly and include only the necessar
 """
 
 
-def build_agent() -> SimpleAgent:
-    """构造编码助手 Agent（不发起任何网络请求）。"""
+def build_agent() -> CodeAgent:
     llm = HelloAgentsLLM()
     registry = ToolRegistry()
     for tool in (
@@ -55,35 +54,40 @@ def build_agent() -> SimpleAgent:
         session_enabled=False,
         devlog_enabled=False,
         todowrite_enabled=False,
+        subagent_enabled=False,
     )
-    return SimpleAgent(
+    return CodeAgent(
         name="CodingAgent",
         llm=llm,
         tool_registry=registry,
         system_prompt=SYSTEM_PROMPT,
         config=config,
+        max_steps=25,
+        max_run_tokens=0,
     )
-
 
 def main() -> None:
     agent = build_agent()
     print("=== 编码助手已启动（输入 exit / quit 退出，Ctrl+C 中断）===")
-    while True:
-        try:
-            text = input("\n你> ").strip()
-        except (EOFError, KeyboardInterrupt):
-            print("\n再见。")
-            break
-        if not text:
-            continue
-        if text.lower() in ("exit", "quit"):
-            break
-        try:
-            answer = agent.run(text)
-        except Exception as exc:  # 单轮出错不退出，继续对话
-            print(f"\n[错误] {exc}")
-            continue
-        print(f"\nAgent> {answer}")
+    try:
+        while True:
+            try:
+                text = input("\n你> ").strip()
+            except (EOFError, KeyboardInterrupt):
+                print("\n再见。")
+                break
+            if not text:
+                continue
+            if text.lower() in ("exit", "quit"):
+                break
+            try:
+                answer = agent.run(text)
+            except Exception as exc:
+                print(f"\n[错误] {exc}")
+                continue
+            print(f"\nAgent> {answer}")
+    finally:
+        agent.finalize_trace()
 
 
 if __name__ == "__main__":
