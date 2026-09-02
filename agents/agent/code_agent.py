@@ -4,6 +4,7 @@ import json
 from ..core.agent import Agent
 from ..core.llm import HelloAgentsLLM
 from ..core.config import Config
+from ..core.llm_response import LLMStreamChunkType, ToolCall
 from ..core.message import Message
 from ..core.streaming import StreamEvent, StreamEventType
 from ..core.lifecycle import LifecycleHook
@@ -57,7 +58,24 @@ class CodeAgent(Agent):
 
     # ------------- 主循环 -------------
     def run(self, input_text: str, **kwargs) -> str:
-        """ 运行 CodeAgent agentic 循环 """
+        """ 运行 CodeAgent（非流式兼容入口，内部消费 stream_run）"""
+        final_text = ""
+        for ev in self.stream_run(input_text, **kwargs):
+            if ev.type == StreamEventType.AGENT_FINISH:
+                final_text = ev.data.get("final_text", "")
+        return final_text
+
+        
+    def stream_run(self, input_text: str, **kwargs) -> str:
+        """ 流式运行 CodeAgent agentic 循环
+
+        Yields:
+            StreamEvent:
+            - THINKING:   思考过程增量
+            - LLM_CHUNK:  正文增量
+            - AGENT_FINISH: 最终结果（data.final_text / data.status）
+        """
+
         from datetime import datetime
 
         self._run_index += 1
@@ -77,36 +95,51 @@ class CodeAgent(Agent):
         while step < self.max_steps:
             step += 1
 
+            content_parts: List[str] = []
+            reasoning_parts: List[str] = []
+            final_calls: List[ToolCall] = []
+            usage = {}
+
             # 1) 调用 LLM（Function Calling）
             try:
-                response = self.llm.invoke_with_tools(
-                    messages=messages, tools=schemas, tool_choice="auto", **kwargs
-                )
+                for chunk in self.llm.stream_invoke_with_tools(
+                    messages=messages, tools=shemas, tool_choice="auto", **kwargs
+                ):
+                    if chunk.type == LLMStreamChunkType.THINKING:
+                        reasoning_parts.append(chunk.text)
+                        yield StreamEvent.create(StreamEventType.THINKING, self.name, text=chunk.text)
+                    elif chunk.type == LLMStreamChunkType.CONTENT:
+                        content_parts.append(chunk.text)
+                        yield StreamEvent.create(StreamEventType.LLM_CHUNK, self.name, text=chunk.text)
+                    elif chunk.type == LLMStreamChunkType.DONE:
+                        final_calls = chunk.tool_calls or []
+                        usage = chunk.usage or {}
             except Exception as e:
                 final_text = f"[出错] LLM 调用失败：{e}"
                 status = "error"
                 break
 
-            tokens_used += response.usage.get("total_tokens", 0) if response.usage else 0
+            content = "".join(content_parts)
+            reasoning_content = "".join(reasoning_parts)
+            tokens_used += usage.get("total_tokens", 0) if usage else 0
             self._log("model_output", {
-                "content": response.content,
-                "tool_calls": len(response.tool_calls) if response.tool_calls else 0,
-                "usage": response.usage or {},
-                "reasoning_content": getattr(response, "reasoning_content", None),
+                "content": content,
+                "tool_calls": len(final_calls) if final_calls else 0,
+                "usage": usage or {},
+                "reasoning_content": reasoning_content,
             }, step=step, run=run_index)
 
             # 2) 自然终止: 没有工具调用，模型输出就是最终答案
-            tool_calls = response.tool_calls
-            if not tool_calls:
-                final_text = response.content or "抱歉, 我无法完成该任务"
+            if not final_calls:
+                final_text =content or "抱歉, 我无法完成该任务"
                 status = "success"
                 break
 
             # 3) 把助手消息追加进上下文
-            messages.append(self._assistant_msg(response))
+            messages.append(self._assistant_msg(_StreamResponse(content, final_calls)))
 
             # 4) 顺序执行工具并回填 tool 消息
-            for tc in tool_calls:
+            for tc in final_calls:
                 tool_call_id = tc.id
                 tool_name = tc.name
                 try:
@@ -168,7 +201,12 @@ class CodeAgent(Agent):
             "status": status,
         }, step=step,run=run_index)
 
-        return final_text
+        yield StreamEvent.create(
+            StreamEventType.AGENT_FINISH,
+            self.name,
+            final_text=final_text,
+            status=status
+        )
 
     # -------------------- 终止兜底（修复残渣 bug） --------------------
     _CONCLUDE_INSTRUCTION = (
@@ -297,3 +335,9 @@ class CodeAgent(Agent):
         """进程结束时调用一次，写入 HTML footer 并关闭文件流。"""
         if self.trace_logger:
             self.trace_logger.finalize()
+
+    class _StreamResponse:
+        """流式路径的轻量响应壳，供 _assistant_msg 复用（提供 content / tool_calls）"""
+        def __init__(self, content: str, tool_calls: List[ToolCall]):
+            self.content = content
+            self.tool_calls = tool_calls

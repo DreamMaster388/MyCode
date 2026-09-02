@@ -329,8 +329,8 @@ class OpenAIAdapter(BaseLLMAdapter):
                                 type=LLMStreamChunkType.TOOL_CALL,
                                 tool_calls=[
                                     ToolCall(
-                                        id=slot["id"],
-                                        name=slot["name"],
+                                        id=s["id"],
+                                        name=s["name"],
                                         arguments=s["arguments"]
                                     ) for s in tool_index.values()
                                 ]
