@@ -66,7 +66,7 @@ class CodeAgent(Agent):
         return final_text
 
         
-    def stream_run(self, input_text: str, **kwargs) -> str:
+    def stream_run(self, input_text: str, **kwargs) -> Iterator[StreamEvent]:
         """ 流式运行 CodeAgent agentic 循环
 
         Yields:
@@ -103,7 +103,7 @@ class CodeAgent(Agent):
             # 1) 调用 LLM（Function Calling）
             try:
                 for chunk in self.llm.stream_invoke_with_tools(
-                    messages=messages, tools=shemas, tool_choice="auto", **kwargs
+                    messages=messages, tools=schemas, tool_choice="auto", **kwargs
                 ):
                     if chunk.type == LLMStreamChunkType.THINKING:
                         reasoning_parts.append(chunk.text)
@@ -146,7 +146,7 @@ class CodeAgent(Agent):
                     arg = json.loads(tc.arguments)
                 except Exception as e:
                     arg = {}
-                    result = "[出错] 工具参数格式错误: {e}"
+                    result = f"[出错] 工具参数格式错误: {e}"
                     self._log("tool_call", {
                         "tool_name": tool_name,
                         "tool_call_id": tool_call_id,
@@ -336,8 +336,8 @@ class CodeAgent(Agent):
         if self.trace_logger:
             self.trace_logger.finalize()
 
-    class _StreamResponse:
-        """流式路径的轻量响应壳，供 _assistant_msg 复用（提供 content / tool_calls）"""
-        def __init__(self, content: str, tool_calls: List[ToolCall]):
-            self.content = content
-            self.tool_calls = tool_calls
+class _StreamResponse:
+    """流式路径的轻量响应壳，供 _assistant_msg 复用（提供 content / tool_calls）"""
+    def __init__(self, content: str, tool_calls: List[ToolCall]):
+        self.content = content
+        self.tool_calls = tool_calls

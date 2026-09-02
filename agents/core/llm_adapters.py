@@ -319,7 +319,8 @@ class OpenAIAdapter(BaseLLMAdapter):
                         if tool_calls:
                             for tc in tool_calls:
                                 slot = tool_index.setdefault(tc.index, {"id": "", "name": "", "arguments": ""})
-                                slot["id"] = tc.id
+                                if tc.id:
+                                    slot["id"] = tc.id
                                 if tc.function:
                                     if tc.function.name:
                                         slot["name"] = tc.function.name
