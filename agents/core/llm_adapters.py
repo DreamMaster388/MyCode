@@ -7,7 +7,7 @@ from openai import APIStatusError
 
 from .exceptions import *
 from .llm_error import LLMErrorCode
-from .llm_response import LLMResponse, StreamStats, LLMToolResponse, ToolCall
+from .llm_response import LLMResponse, StreamStats, LLMToolResponse, ToolCall, LLMStreamChunk, LLMStreamChunkType
 
 
 class BaseLLMAdapter(ABC):
@@ -48,6 +48,10 @@ class BaseLLMAdapter(ABC):
     def invoke_with_tools(self, message: List[Dict], tools: List[Dict], **kwargs) -> LLMToolResponse:
         """ 工具调用（Function Calling）"""
         pass
+
+    def stream_invoke_with_tools(self, message: List[Dict], tools: List[Dict], **kwargs) -> Iterable[LLMStreamChunk]:
+        """ 流式调用并支持工具调用（Function Calling），子类应实现 """
+        raise NotImplementedError
 
     def _is_thinking_model(self, model_name: str) -> bool:
         """ 判断是否为thinking model """
@@ -254,6 +258,118 @@ class OpenAIAdapter(BaseLLMAdapter):
         except Exception as e:
             raise self._map_error(e)
 
+    def stream_invoke_with_tools(self, messages: List[Dict], tools: List[Dict],
+                                  tool_choice: Union[str, Dict] = "auto", **kwargs) -> Iterable[LLMStreamChunk]:
+        """ 流式调用并支持工具调用（Function Calling）
+        
+        以 LLMStreamChunk 切片流式返回：
+        - THINKING: 思考过程增量
+        - CONTENT:  正文增量
+        - TOOL_CALL: 工具调用增量
+        - DONE:     一轮结束（携带完整 tool_calls / usage / 累计 reasoning）
+        """
+        if not self._client:
+            self._client = self.create_client()
+
+        start_time = time.time()
+        try:
+            response = self._client.chat.completions.create(
+                model=self.model,
+                messages=messages,
+                tools=tools,
+                tool_choice=tool_choice,
+                stream=True,
+                **kwargs
+            )
+
+            content_parts: List[str] = []
+            reasoning_parts: List[str] = []
+            tool_index: Dict[int, Dict[str, str]] = {}  # index -> {id, name, arguments}
+            usage: Dict[str, int] = {}
+            finish_reason: Optional[str] = None
+            is_thinking = self._is_thinking_model(self.model)
+
+            for chunk in response:
+                choices = getattr(chunk, "choices", None)
+                if choices:
+                    delta = getattr(choices[0], "delta", None)
+                    fc = getattr(choices[0], "finish_reason", None)
+                    if fc:
+                        finish_reason = fc
+                    if delta is not None:
+                        # 思考过程（thinking model）
+                        if is_thinking:
+                            thinking = getattr(delta, "reasoning_content", None)
+                            if thinking:
+                                reasoning_parts.append(thinking)
+                                yield LLMStreamChunk(
+                                    type=LLMStreamChunkType.THINKING,
+                                    text=thinking
+                                )
+                        # 正文
+                        content = getattr(delta, "content", None)
+                        if content:
+                            content_parts.append(content)
+                            yield LLMStreamChunk(
+                                type=LLMStreamChunkType.CONTENT,
+                                text=content
+                            )
+                        # 工具调用（OpenAI 流式按 index 分段拼接）
+                        tool_calls = getattr(delta, "tool_calls", None)
+                        if tool_calls:
+                            for tc in tool_calls:
+                                slot = tool_index.setdefault(tc.index, {"id": "", "name": "", "arguments": ""})
+                                slot["id"] = tc.id
+                                if tc.function:
+                                    if tc.function.name:
+                                        slot["name"] = tc.function.name
+                                    if tc.function.arguments:
+                                        slot["arguments"] += tc.function.arguments
+                            yield LLMStreamChunk(
+                                type=LLMStreamChunkType.TOOL_CALL,
+                                tool_calls=[
+                                    ToolCall(
+                                        id=slot["id"],
+                                        name=slot["name"],
+                                        arguments=s["arguments"]
+                                    ) for s in tool_index.values()
+                                ]
+                            )
+                # usage 一般在最后 chunk 携带
+                if hasattr(chunk, 'usage') and chunk.usage:
+                    usage = {
+                        "prompt_tokens": chunk.usage.prompt_tokens,
+                        "completion_tokens": chunk.usage.completion_tokens,
+                        "total_tokens": chunk.usage.total_tokens
+                    }
+
+            final_tool_calls = [
+                ToolCall(id=s["id"], name=s["name"], arguments=s["arguments"])
+                for _, s in sorted(tool_index.items())
+            ]
+            reasoning_content = "".join(reasoning_parts) if reasoning_parts else None
+
+            latency_ms = int((time.time() - start_time) * 1000)
+            self.last_status = StreamStats(
+                model=self.model,
+                usage=usage,
+                latency_ms=latency_ms,
+                reasoning_content=reasoning_content
+            )
+            yield LLMStreamChunk(
+                type=LLMStreamChunkType.DONE,
+                text="".join(content_parts),
+                tool_calls=final_tool_calls,
+                usage=usage,
+                reasoning_content=reasoning_content,
+                finish_reason=finish_reason
+            )
+
+        except LLMException:
+            raise  # 已经是统一异常，直接透传
+        except Exception as e:
+            raise self._map_error(e)
+            
     def _map_error(self, e: Exception) -> LLMException:
         """将 OpenAI SDK 异常映射为统一 LLMException"""
         from openai import (
