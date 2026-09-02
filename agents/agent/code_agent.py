@@ -132,7 +132,11 @@ class CodeAgent(Agent):
                     "tool_call_id": tool_call_id,
                     "args": arg
                 }, step=step, run=run_index)
+                print(f"Executing tool: {tool_name}")
                 result = self._run_and_truncate(tool_name, arg)
+                tool = self.tool_registry.get_tool(tool_name)
+                print(tool.brief(result))
+                print('\n')
                 self._log("tool_result", {
                     "tool_name": tool_name,
                     "tool_call_id": tool_call_id,

@@ -230,6 +230,15 @@ class Tool(ABC):
             }
         }
 
+    def brief(self, result: str, max_line: Optional[int] = 5) -> str:
+        """简要描述结果，默认返回字符串表示, 子类可覆盖作定制展示"""
+        lines = result.splitlines()
+        if len(lines) <= max_line:
+            wrapped = result
+        else:
+            wrapped = "\n".join(lines[:max_line]) + "\n..."
+        return f"==== {self.name} tool call result ====\n{wrapped}\n==== end {self.name} tool call result ===="
+
     def __str__(self) -> str:
         return f"Tool(name={self.name})"
 
