@@ -2,6 +2,7 @@
 
 from typing import Optional, Dict, List
 from dataclasses import dataclass, field
+from enum import Enum
 
 
 @dataclass
@@ -11,6 +12,10 @@ class ToolCall:
     name: str
     arguments: str
 
+    def to_dict(self) -> Dict:
+        return {"id": self.id, "name": self.name, "arguments": self.arguments}
+
+
 @dataclass
 class LLMToolResponse:
     """统一的工具调用响应对象"""
@@ -19,6 +24,8 @@ class LLMToolResponse:
     model: str
     usage: Dict[str, int] = field(default_factory=dict)
     latency_ms: int = 0
+    reasoning_content: Optional[str] = None  # 新增：思考/推理过程
+
 
 @dataclass
 class LLMResponse:
@@ -56,7 +63,6 @@ class LLMResponse:
         parts = [
             f"LLMResponse(model={self.model})",
             f"latency_ms={self.latency_ms}",
-            f"reasoning_content={self.reasoning_content}",
         ]
         if self.reasoning_content:
             parts.append(f"reasoning_content={self.reasoning_content}")
@@ -88,7 +94,7 @@ class StreamStats:
 
     流式场景中，content 已经被消费掉了，剩的只有 metadata
 
-    LLMResponse 表示"一次完整调用结果"，而 StreamStats 是"流结束后的残留统计
+    LLMResponse 表示"一次完整调用结果"，而 StreamStats 是流结束后的残留统计
     """
 
     model: str
@@ -113,3 +119,40 @@ class StreamStats:
         if self.reasoning_content:
             result["reasoning_content"] = self.reasoning_content
         return result
+
+
+class LLMStreamChunkType(str, Enum):
+    """流式切片类型"""
+    CONTENT = "content"  # 正文增量
+    THINKING = "thinking"  # 思考/推理过程增量
+    TOOL_CALL = "tool_call"  # 工具调用增量
+    DONE = "done"  # 一轮结束：tool_calls 汇总 + usage + 累计 reasoning
+
+
+@dataclass
+class LLMStreamChunk:
+    """流式调用返回的单个切片
+
+    一次模型调用会吐出一串这类对象：
+    - THINKING: 思考过程增量（仅 thinking model 有）
+    - CONTENT:  正文增量
+    - TOOL_CALL: 工具调用增量（可选，逐段渲染）
+    - DONE:      一轮结束，包含 tool_calls 汇总 + usage + reasoning_content
+    """
+
+    type: LLMStreamChunkType
+    text: str = ""
+    tool_calls: Optional[List[ToolCall]] = None
+    usage: Dict[str, int] = field(default_factory=dict)
+    reasoning_content: Optional[str] = None
+    finish_reason: Optional[str] = None
+
+    def to_dict(self) -> Dict:
+        return {
+            "type": self.type.value,
+            "text": self.text,
+            "tool_calls": [tc.to_dict() for tc in self.tool_calls] if self.tool_calls else None,
+            "usage": self.usage,
+            "reasoning_content": self.reasoning_content,
+            "finish_reason": self.finish_reason,
+        }

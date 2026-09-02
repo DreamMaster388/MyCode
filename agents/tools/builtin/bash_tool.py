@@ -42,7 +42,6 @@ class BashTool(Tool):
         import subprocess
 
         try:
-            print(f"Executing command: {command}")
             result = subprocess.run(command, shell=True, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=parameters.get("timeout", 30))
             return ToolResponse.success(text=result.stdout)
         except subprocess.CalledProcessError as e:

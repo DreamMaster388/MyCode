@@ -6,7 +6,7 @@ from typing import Optional, List, Dict, Iterator, Union
 from .llm_error import RetryConfig
 from .exceptions import HelloAgentsException, LLMException
 from .llm_adapters import BaseLLMAdapter, create_adapter
-from .llm_response import LLMResponse, StreamStats, LLMToolResponse
+from .llm_response import LLMResponse, StreamStats, LLMToolResponse, LLMStreamChunk
 
 
 class HelloAgentsLLM:
@@ -216,6 +216,50 @@ class HelloAgentsLLM:
         call_kwargs.update(kwargs)
 
         return self._retry_with_back_off(self._adapter.invoke_with_tools, messages, tools, **call_kwargs)
+
+    def stream_invoke_with_tools(
+        self,
+        messages: List[Dict],
+        tools: List[Dict],
+        tool_choice: Union[str, dict] = "auto",
+        **kwargs
+    ) -> Iterator["LLMStreamChunk"]:
+        """
+        流式调用 LLM 并支持工具调用（Function Calling）
+
+        以 LLMStreamChunk 切片流式返回：
+        - THINKING: 思考过程增量
+        - CONTENT:  正文增量
+        - TOOL_CALL: 工具调用增量
+        - DONE:     一轮结束（完整 tool_calls / usage / 累计 reasoning）
+
+        Args:
+            messages: 消息列表
+            tools: 工具 schema 列表
+            tool_choice: 工具选择策略（"auto"/"none"/"required"/指定工具）
+            **kwargs: 其他参数（temperature, max_tokens 等）
+
+        Yields:
+            LLMStreamChunk
+
+        Note:
+            流式调用结束后，可通过 llm.last_call_stats 获取统计信息
+        """
+        # 合并参数
+        call_kwargs = {
+            "temperature": kwargs.pop("temperature", self.temperature),
+            "tool_choice": tool_choice,
+        }
+        if self.max_tokens:
+            call_kwargs["max_tokens"] = kwargs.pop("max_tokens", self.max_tokens)
+        call_kwargs.update(kwargs)
+
+        for chunk in self._adapter.stream_invoke_with_tools(messages, tools, **call_kwargs):
+            yield chunk
+
+        # 保存统计信息
+        if hasattr(self._adapter, "last_stats"):
+            self.last_call_stats = self._adapter.last_stats
 
     def _retry_with_back_off(self, fn, *args, **kwargs):
         cfg = self.retry_config
