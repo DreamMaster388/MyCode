@@ -15,6 +15,7 @@ load_dotenv()
 from agents.core.llm import HelloAgentsLLM
 from agents.core.config import Config
 from agents.agent.code_agent import CodeAgent
+from agents.core.streaming import StreamEventType
 from agents.tools.registry import ToolRegistry
 from agents.tools.builtin import ReadTool, WriteTool, EditTool, BashTool, GrepTool, GlobTool
 
@@ -81,11 +82,22 @@ def main() -> None:
             if text.lower() in ("exit", "quit"):
                 break
             try:
-                answer = agent.run(text)
+                for event in agent.stream_run(text):
+                    if event.type == StreamEventType.THINKING:
+                        # 思考过程：边想边滚，用 🧠 前缀区分
+                        print(f"\n🧠 {event.data.get('text', '')}", end="", flush=True)
+                    elif event.type == StreamEventType.LLM_CHUNK:
+                        # 正文增量：逐字打印
+                        print(event.data.get("text", ""), end="", flush=True)
+                    elif event.type == StreamEventType.AGENT_FINISH:
+                        # 非 success（错误/预算/超步）时，整段结果一次性打印
+                        status = event.data.get("status", "")
+                        if status != "success":
+                            print(f"\n{event.data.get('final_text', '')}")
             except Exception as exc:
                 print(f"\n[错误] {exc}")
                 continue
-            print(f"\nAgent> {answer}")
+            print()
     finally:
         agent.finalize_trace()
 
