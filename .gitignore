@@ -29,3 +29,8 @@ traces/
 .DS_Store
 
 log/
+
+.opencode/
+
+# ── Eval harness artifacts ──
+eval/results/
