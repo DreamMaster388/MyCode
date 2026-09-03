@@ -1,0 +1,20 @@
+{
+  "instance_id": "demo_fizzbuzz",
+  "problem_statement": "In the fizzbuzz function, numbers divisible by both 3 and 5 (multiples of 15) currently return \"Buzz\" instead of \"FizzBuzz\". Fix the function so multiples of 15 return \"FizzBuzz\" by checking the condition for divisibility by 15 before the conditions for 3 or 5. Numbers divisible only by 3 should still return \"Fizz\", numbers divisible only by 5 should still return \"Buzz\", and other numbers should remain as integers.",
+  "repo_url": null,
+  "base_commit": null,
+  "repo_dir": "demo_fizzbuzz/repo",
+  "test_patch": null,
+  "test_files": {
+    "tests/test_fizzbuzz.py": "from fizzbuzz import fizzbuzz\n\n\ndef test_returns_list_of_length_n():\n    assert len(fizzbuzz(15)) == 15\n\n\ndef test_multiples_of_three_are_fizz():\n    assert fizzbuzz(3)[-1] == \"Fizz\"\n\n\ndef test_multiples_of_five_are_buzz():\n    assert fizzbuzz(5)[-1] == \"Buzz\"\n\n\ndef test_multiples_of_fifteen_are_fizzbuzz():\n    assert fizzbuzz(15)[-1] == \"FizzBuzz\"\n"
+  },
+  "test_cmd": "python -m pytest tests/test_fizzbuzz.py -v --tb=no",
+  "fail_to_pass": [
+    "tests/test_fizzbuzz.py::test_multiples_of_fifteen_are_fizzbuzz"
+  ],
+  "pass_to_pass": [
+    "tests/test_fizzbuzz.py::test_returns_list_of_length_n",
+    "tests/test_fizzbuzz.py::test_multiples_of_three_are_fizz",
+    "tests/test_fizzbuzz.py::test_multiples_of_five_are_buzz"
+  ]
+}
