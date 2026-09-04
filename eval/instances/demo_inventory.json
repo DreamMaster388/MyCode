@@ -1,0 +1,18 @@
+{
+  "instance_id": "demo_inventory",
+  "problem_statement": "In shop.py, the Order.place method currently checks stock and decrements inventory item by item. As a result, if a later item is out of stock, the earlier items have already been decremented, leaving the inventory in a partial (non-atomic) state. Fix place so it validates that every item has enough stock BEFORE decrementing any of them; if any item lacks stock it must raise ValueError and leave all inventory unchanged. Fully valid orders should still decrement all stock and return the correct total.",
+  "repo_url": null,
+  "base_commit": null,
+  "repo_dir": "demo_inventory/repo",
+  "test_patch": null,
+  "test_files": {
+    "tests/test_shop.py": "import pytest\nfrom shop import Product, Inventory, Order\n\n\ndef _inv():\n    inv = Inventory()\n    inv.add(Product(\"apple\", 1.0, 10))\n    inv.add(Product(\"banana\", 2.0, 5))\n    return inv\n\n\ndef test_valid_order_totals_and_decrements():\n    inv = _inv()\n    total = Order(inv, {\"apple\": 3, \"banana\": 2}).place()\n    assert total == 3 * 1.0 + 2 * 2.0\n    assert inv.stock_of(\"apple\") == 7\n    assert inv.stock_of(\"banana\") == 3\n\n\ndef test_partial_out_of_stock_is_atomic():\n    inv = _inv()\n    with pytest.raises(ValueError):\n        Order(inv, {\"apple\": 1, \"banana\": 99}).place()\n    assert inv.stock_of(\"apple\") == 10\n    assert inv.stock_of(\"banana\") == 5\n"
+  },
+  "test_cmd": "python -m pytest tests/test_shop.py -v --tb=no",
+  "fail_to_pass": [
+    "tests/test_shop.py::test_partial_out_of_stock_is_atomic"
+  ],
+  "pass_to_pass": [
+    "tests/test_shop.py::test_valid_order_totals_and_decrements"
+  ]
+}

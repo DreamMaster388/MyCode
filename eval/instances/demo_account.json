@@ -1,0 +1,21 @@
+{
+  "instance_id": "demo_account",
+  "problem_statement": "In bank.py, the Account.withdraw method currently allows withdrawing more than the available balance, letting the balance go negative. Fix withdraw so that it rejects a withdrawal exceeding the current balance by raising ValueError and leaving the balance unchanged. Deposits, valid withdrawals, and interest calculation should keep working as before.",
+  "repo_url": null,
+  "base_commit": null,
+  "repo_dir": "demo_account/repo",
+  "test_patch": null,
+  "test_files": {
+    "tests/test_bank.py": "import pytest\nfrom bank import Account\n\n\ndef test_deposit_increases_balance():\n    acct = Account(\"alice\", 100.0)\n    acct.deposit(50.0)\n    assert acct.balance == 150.0\n\n\ndef test_deposit_non_positive_raises():\n    acct = Account(\"alice\", 100.0)\n    with pytest.raises(ValueError):\n        acct.deposit(0)\n\n\ndef test_withdraw_valid():\n    acct = Account(\"alice\", 100.0)\n    acct.withdraw(30.0)\n    assert acct.balance == 70.0\n\n\ndef test_withdraw_insufficient_funds_raises():\n    acct = Account(\"alice\", 100.0)\n    with pytest.raises(ValueError):\n        acct.withdraw(150.0)\n    assert acct.balance == 100.0\n\n\ndef test_apply_interest():\n    acct = Account(\"alice\", 100.0)\n    acct.apply_interest(0.05, 12)\n    assert acct.balance == 160.0\n"
+  },
+  "test_cmd": "python -m pytest tests/test_bank.py -v --tb=no",
+  "fail_to_pass": [
+    "tests/test_bank.py::test_withdraw_insufficient_funds_raises"
+  ],
+  "pass_to_pass": [
+    "tests/test_bank.py::test_deposit_increases_balance",
+    "tests/test_bank.py::test_deposit_non_positive_raises",
+    "tests/test_bank.py::test_withdraw_valid",
+    "tests/test_bank.py::test_apply_interest"
+  ]
+}

@@ -1,0 +1,22 @@
+{
+  "instance_id": "demo_number_utils",
+  "problem_statement": "In number_utils.py, the is_prime function incorrectly classifies 0 and 1 as prime numbers. Fix is_prime so that any integer less than 2 returns False (0 and 1 are not prime), while correctly identifying true primes like 2, 3, 7 and rejecting composites like 9. Also ensure count_primes, which relies on is_prime, produces the correct count over a range.",
+  "repo_url": null,
+  "base_commit": null,
+  "repo_dir": "demo_number_utils/repo",
+  "test_patch": null,
+  "test_files": {
+    "tests/test_number_utils.py": "from number_utils import is_prime, count_primes\n\n\ndef test_is_prime_zero():\n    assert is_prime(0) is False\n\n\ndef test_is_prime_one():\n    assert is_prime(1) is False\n\n\ndef test_is_prime_true():\n    assert is_prime(2) is True\n\n\ndef test_is_prime_large_true():\n    assert is_prime(7) is True\n\n\ndef test_is_prime_composite():\n    assert is_prime(9) is False\n\n\ndef test_count_primes_range():\n    assert count_primes(2, 10) == 4\n"
+  },
+  "test_cmd": "python -m pytest tests/test_number_utils.py -v --tb=no",
+  "fail_to_pass": [
+    "tests/test_number_utils.py::test_is_prime_zero",
+    "tests/test_number_utils.py::test_is_prime_one"
+  ],
+  "pass_to_pass": [
+    "tests/test_number_utils.py::test_is_prime_true",
+    "tests/test_number_utils.py::test_is_prime_large_true",
+    "tests/test_number_utils.py::test_is_prime_composite",
+    "tests/test_number_utils.py::test_count_primes_range"
+  ]
+}
