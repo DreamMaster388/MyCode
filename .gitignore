@@ -34,3 +34,5 @@ log/
 
 # ── Eval harness artifacts ──
 eval/results/
+
+temp.py
