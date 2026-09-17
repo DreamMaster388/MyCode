@@ -100,6 +100,9 @@ class ReadTool(Tool, _FsTool):
     - offset: 起始行号（可选，默认 0，仅文件有效）
     - limit: 最大行数（可选，默认 2000，仅文件有效）
     """
+
+    is_write_tool = False          # 读工具: 不围栏(默认值, 显式声明便于阅读)
+    path_params = ("path",)
     
     def __init__(
         self,
@@ -326,6 +329,9 @@ class WriteTool(Tool, _FsTool):
     - file_mtime_ms: 缓存的 mtime（可选，用于冲突检测）
     """
 
+    is_write_tool = True
+    path_params = ("path",)
+
     def __init__(
         self,
         project_root: str = ".",
@@ -469,6 +475,9 @@ class EditTool(Tool, _FsTool):
     - new_string: 替换后的内容
     - file_mtime_ms: 缓存的 mtime（可选）
     """
+
+    is_write_tool = True
+    path_params = ("path",)
 
     def __init__(
         self,
@@ -635,6 +644,9 @@ class MultiEditTool(Tool, _FsTool):
     - edits: 替换列表 [{"old_string": "...", "new_string": "..."}]
     - file_mtime_ms: 缓存的 mtime（可选）
     """
+
+    is_write_tool = True
+    path_params = ("path",)
 
     def __init__(
         self,
