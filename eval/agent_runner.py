@@ -24,6 +24,8 @@ from agents.tools.builtin import (
     WriteTool,
 )
 from agents.tools.registry import ToolRegistry
+from agents.fs import build_policy, SandboxMode
+
 
 # 面向"仓库内改代码"的简洁系统提示
 SYSTEM_PROMPT = (
@@ -39,11 +41,12 @@ def build_agent(workdir: str, max_steps: int = 25) -> CodeAgent:
     """构造绑定到 workdir 的 CodeAgent（关闭影响评测的附加功能）。"""
     llm = HelloAgentsLLM()
     registry = ToolRegistry()
+    policy = build_policy(SandboxMode.WORKSPACE_WRITE, workdir)
     for tool in (
-        ReadTool(project_root=workdir),
-        WriteTool(project_root=workdir),
-        EditTool(project_root=workdir),
-        BashTool(),
+        ReadTool(project_root=workdir, policy=policy),
+        WriteTool(project_root=workdir, policy=policy),
+        EditTool(project_root=workdir, policy=policy),
+        BashTool(project_root=workdir, policy=policy),
         GrepTool(project_root=workdir),
         GlobTool(project_root=workdir),
     ):

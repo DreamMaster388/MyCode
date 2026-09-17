@@ -11,7 +11,7 @@ import sys
 from dotenv import load_dotenv
 
 load_dotenv()
-
+from agents.fs import build_policy, SandboxMode
 from agents.core.llm import HelloAgentsLLM
 from agents.core.config import Config
 from agents.agent.code_agent import CodeAgent
@@ -39,11 +39,12 @@ Keep responses concise: state conclusions directly and include only the necessar
 def build_agent() -> CodeAgent:
     llm = HelloAgentsLLM()
     registry = ToolRegistry()
+    policy = build_policy(SandboxMode.WORKSPACE_WRITE, ".")
     for tool in (
-        ReadTool(),
-        WriteTool(),
-        EditTool(),
-        BashTool(),
+        ReadTool(policy=policy),
+        WriteTool(policy=policy),
+        EditTool(policy=policy),
+        BashTool(policy=policy),
         GrepTool(),
         GlobTool()
     ):
