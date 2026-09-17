@@ -5,21 +5,24 @@ ModeGuard 审查, 只有在当前模式下合法的操作才会被放行。
 
 - AgentMode: build / plan 两种模式。
 - ModeGuard: 工具执行入口守卫。
-    * 非 bash 工具: plan 只允许 read_only 工具。
+    * 非 bash 工具: plan 只允许只读白名单内的工具; build 对写工具的路径参数做沙箱。
     * bash 工具:  plan 按"只读白名单"审查; build 按"高危拦截 + 路径沙箱"审查。
 - 规则函数(read_only/high_risk/path_sandbox)消费 CommandAudit。
 
 设计原则(与 command_audit 一致): 默认拒绝。凡是解析不了、判断不了的情况,
 一律返回拦截原因, 而不是猜测安全后放行。
 """
-from __future__ import annotations
-
 from enum import Enum
-from typing import Any, Optional
+from typing import TYPE_CHECKING, Any, Optional
+
 from ..fs import (
     PathError, SandboxDenied, SandboxMode, SandboxPolicy,
     authorize_write, build_policy, resolve_path,
 )
+from ..tools.tool_filter import ReadOnlyFilter
+
+if TYPE_CHECKING:
+    from ..tools.base import Tool
 
 
 class AgentMode(str, Enum):
@@ -48,6 +51,10 @@ GIT_READONLY = frozenset({
     "rev-parse", "config", "ls-files", "ls-tree", "grep", "blame", "cat-file",
     "show-ref", "name-rev", "shortlog",
 })
+# plan 模式承认的只读工具(与 agents/tools/tool_filter.py 的 ReadOnlyFilter 同源,
+# 避免两处漂移; 工具名统一小写后比较)。
+PLAN_READONLY_TOOLS = frozenset(name.lower() for name in ReadOnlyFilter.READONLY_TOOLS)
+
 # 注入给模型的系统提示: 告诉它当前处于 plan 模式。
 # 注意这只是"软约束"(引导模型别乱来), 真正的硬拦截仍由 ModeGuard 在工具调用处完成。
 PLAN_HINT = (
@@ -83,13 +90,21 @@ class ModeGuard:
         if self._explicit_policy is None:
             self.policy = _default_policy(mode, self.project_root)
 
-    def check_tool(self, tool_name: str, args: dict[str, Any], read_only: bool = False):
+    def check_tool(
+        self,
+        tool_name: str,
+        args: dict[str, Any],
+        tool: Optional["Tool"] = None,
+        read_only: Optional[bool] = None,
+    ) -> Optional[str]:
         """工具执行前的统一入口检查。
 
         参数:
-            tool_name: 工具名(如 'bash'/'write'/'read')。
-            args:      工具调用参数; bash 会从中取 'command'。
-            read_only: 调用方声明的该工具是否只读, 供非 bash 工具在 plan 下判断。
+            tool_name: 工具名(如 'bash'/'Write'/'read')。
+            args:      工具调用参数。
+            tool:      对应的 Tool 对象(可选)。提供时按其 is_write_tool /
+                       path_params 元数据判定, 元数据优先于 read_only。
+            read_only: 无 Tool 对象时的回退声明(旧语义): True 表示只读。
 
         返回:
             None 表示放行; 非空 str 表示拦截原因。
@@ -97,10 +112,42 @@ class ModeGuard:
         # bash 命令内容复杂(管道/重定向/子命令), 统一交给命令审计处理。
         if tool_name.lower() == "bash":
             return self._check_bash(args)
-        # 非 bash 工具: plan 模式下只有被标记为 read_only 的才允许。
-        if self.mode == AgentMode.PLAN and not read_only:
-            return (f"plan 模式拦截: 工具 '{tool_name}' 是写操作, 不可用。"
-                                f"仅 Read/Grep/Glob 与只读 bash 可用。")
+
+        # 取能力元数据; 没有 Tool 对象时回退到 read_only 形参。
+        if tool is not None:
+            is_write = bool(getattr(tool, "is_write_tool", False))
+            path_params = tuple(getattr(tool, "path_params", ()) or ())
+        else:
+            is_write = not bool(read_only)
+            path_params = ()
+
+        # plan: 只读白名单, 默认拒绝(不在名单内的一律拦截)。
+        if self.mode == AgentMode.PLAN:
+            if tool_name.lower() not in PLAN_READONLY_TOOLS:
+                return (f"plan 模式拦截: 工具 '{tool_name}' 不可用。"
+                        f"仅 Read/Grep/Glob 与只读 bash 可用。")
+            return None
+
+        # build: 写工具对每个路径参数做路径沙箱(与文件工具共用同一策略)。
+        if is_write and path_params:
+            return self._check_path_params(args, path_params)
+        return None
+
+    def _check_path_params(self, args: dict[str, Any], path_params) -> Optional[str]:
+        """build规则: 对写工具的路径参数逐个做可写根校验。"""
+        root = self.policy.workspace_root.display_path
+        for name in path_params:
+            raw = (args or {}).get(name)
+            if not raw:
+                continue
+            try:
+                target = resolve_path(raw, root)
+            except PathError as exc:
+                return f"路径参数 '{name}' 无法解析: {exc}"
+            try:
+                authorize_write(self.policy, target)
+            except SandboxDenied as exc:
+                return f"路径参数 '{name}' 被拦截: {exc}"
         return None
 
     def _check_bash(self, args: dict[str, Any]) -> Optional[str]:
