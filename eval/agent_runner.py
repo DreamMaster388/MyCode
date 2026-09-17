@@ -25,6 +25,7 @@ from agents.tools.builtin import (
 )
 from agents.tools.registry import ToolRegistry
 from agents.fs import build_policy, SandboxMode
+from agents.core.mode import AgentMode, ModeGuard
 
 
 # 面向"仓库内改代码"的简洁系统提示
@@ -42,6 +43,8 @@ def build_agent(workdir: str, max_steps: int = 25) -> CodeAgent:
     llm = HelloAgentsLLM()
     registry = ToolRegistry()
     policy = build_policy(SandboxMode.WORKSPACE_WRITE, workdir)
+    # 守卫与工具共用同一 policy, 保证 bash/文件工具的围栏根一致。
+    guard = ModeGuard(AgentMode.BUILD, policy=policy)
     for tool in (
         ReadTool(project_root=workdir, policy=policy),
         WriteTool(project_root=workdir, policy=policy),
@@ -64,6 +67,7 @@ def build_agent(workdir: str, max_steps: int = 25) -> CodeAgent:
         name="EvalCodingAgent",
         llm=llm,
         tool_registry=registry,
+        mode_guard=guard,
         system_prompt=SYSTEM_PROMPT,
         config=config,
         max_steps=max_steps,

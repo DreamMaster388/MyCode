@@ -5,7 +5,7 @@ from .message import Message
 from .llm import HelloAgentsLLM
 from .config import Config
 from .lifecycle import AgentEvent, EventType, LifecycleHook, ExecutionContext
-
+from .mode import AgentMode, ModeGuard
 
 if TYPE_CHECKING:
     from ..tools.registry import ToolRegistry
@@ -34,6 +34,7 @@ class Agent(ABC):
         system_prompt: Optional[str] = None,
         config: Optional[Config] = None,
         tool_registry: Optional['ToolRegistry'] = None,
+        mode_guard: Optional['ModeGuard'] = None
     ):
         self.name = name
         self.llm = llm
@@ -42,6 +43,9 @@ class Agent(ABC):
 
         # 工具注册表(可选)
         self.tool_registry = tool_registry
+
+        # 执行入口守卫: 未显式提供时默认 build; 要与工具共用同一 policy 请显式传入。
+        self.mode_guard = mode_guard or ModeGuard()
 
         # 新增：上下文工程组件
         from ..context.history import HistoryManager
@@ -127,6 +131,10 @@ class Agent(ABC):
         # 新增：DevLog 开发日志组件
         if self.config.devlog_enabled and self.tool_registry:
             self._register_devlog_tool()
+
+    def set_mode(self, mode: AgentMode) -> None:
+        """切换运行模式(plan/build)。"""
+        self.mode_guard.set_mode(mode)
 
     @property
     def _history(self) -> List[Message]:
@@ -494,6 +502,12 @@ class Agent(ABC):
 
         # 1. 尝试执行 Tool 对象
         tool = self.tool_registry.get_tool(tool_name)
+
+        # 0) 入口守卫: 按当前模式审查; 被拒则直接返回, 不执行。
+        reason = self.mode_guard.check_tool(tool_name, arguments or {}, tool=tool)
+        if reason:
+            return f"🚫 已拦截 [{tool_name}]: {reason}"
+
         if tool:
             try:
                 typed_arguments = self._convert_parameter_types(tool_name, arguments)

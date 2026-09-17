@@ -30,6 +30,7 @@ class CodeAgent(Agent):
         system_prompt: Optional[str] = None,
         config: Optional[Config] = None,
         tool_registry: Optional['ToolRegistry'] = None,
+        mode_guard = None,
         max_steps: int = 25,
         max_run_tokens: int = 0,
     ):
@@ -49,7 +50,8 @@ class CodeAgent(Agent):
             llm,
             system_prompt or DEFAULT_CODEC_SYSTEM_PROMPT,
             config,
-            tool_registry=tool_registry
+            tool_registry=tool_registry,
+            mode_guard=mode_guard
         )
         self.max_steps = max_steps
         self.max_run_tokens = max_run_tokens

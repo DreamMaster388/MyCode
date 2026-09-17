@@ -18,6 +18,8 @@ from agents.agent.code_agent import CodeAgent
 from agents.core.streaming import StreamEventType
 from agents.tools.registry import ToolRegistry
 from agents.tools.builtin import ReadTool, WriteTool, EditTool, BashTool, GrepTool, GlobTool
+from agents.core.mode import AgentMode, ModeGuard
+
 
 
 SYSTEM_PROMPT = """You are a coding assistant operating in the user's local working directory. You accomplish tasks by calling tools. Follow this three-tier tool-calling hierarchy:
@@ -40,6 +42,7 @@ def build_agent() -> CodeAgent:
     llm = HelloAgentsLLM()
     registry = ToolRegistry()
     policy = build_policy(SandboxMode.WORKSPACE_WRITE, ".")
+    guard = ModeGuard(AgentMode.BUILD, policy=policy)
     for tool in (
         ReadTool(policy=policy),
         WriteTool(policy=policy),
@@ -62,6 +65,7 @@ def build_agent() -> CodeAgent:
         name="CodingAgent",
         llm=llm,
         tool_registry=registry,
+        mode_guard=guard,
         system_prompt=SYSTEM_PROMPT,
         config=config,
         max_steps=25,
