@@ -28,11 +28,64 @@ from ..base import Tool, ToolParameter
 from ..response import ToolResponse
 from ..errors import ToolErrorCode
 
+from ...fs import (
+    FsTarget,
+    PathError,
+    SandboxDenied,
+    SandboxMode,
+    SandboxPolicy,
+    authorize_write,
+    build_policy,
+    resolve_path,
+)
+
 if TYPE_CHECKING:
     from ..registry import ToolRegistry
 
+class _FsTool:
+    """文件工具共享的路径解析与写授权能力。
 
-class ReadTool(Tool):
+    - project_root: 工作区根(策略边界)。
+    - working_dir : 相对路径的解析基准(默认 = project_root)。
+    - policy      : 沙箱策略; 未提供时按 project_root 生成 workspace-write。
+    """
+
+    project_root: Path
+    working_dir: Path
+    policy: SandboxPolicy
+
+    def _init_fs(self, project_root=".", working_dir=None, policy=None) -> None:
+        self.project_root = Path(project_root).resolve()
+        self.working_dir = Path(working_dir).resolve() if working_dir else self.project_root
+        if policy is None:
+            policy = build_policy(SandboxMode.WORKSPACE_WRITE, str(self.project_root))
+        self.policy = policy
+
+    def _resolve(self, path: str) -> FsTarget:
+        """把调用方路径解析成稳定身份(相对 working_dir)。"""
+        return resolve_path(path, self.working_dir)
+
+    def _prepare_read(self, path: str):
+        """解析读目标; 返回 (full_path, error_response)。读不授权。"""
+        try:
+            target = self._resolve(path)
+        except PathError as exc:
+            return None, ToolResponse.error(code=ToolErrorCode.INVALID_PARAM, message=str(exc))
+        return Path(target.target_key), None
+
+    def _prepare_write(self, path: str):
+        """解析并授权写目标; 返回 (full_path, error_response)。"""
+        try:
+            target = self._resolve(path)
+            authorize_write(self.policy, target)
+        except PathError as exc:
+            return None, ToolResponse.error(code=ToolErrorCode.INVALID_PARAM, message=str(exc))
+        except SandboxDenied as exc:
+            return None, ToolResponse.error(code=ToolErrorCode.ACCESS_DENIED, message=str(exc))
+        return Path(target.target_key), None
+
+
+class ReadTool(Tool, _FsTool):
     """文件读取工具
 
     功能：
@@ -47,20 +100,23 @@ class ReadTool(Tool):
     - offset: 起始行号（可选，默认 0，仅文件有效）
     - limit: 最大行数（可选，默认 2000，仅文件有效）
     """
+
+    is_write_tool = False          # 读工具: 不围栏(默认值, 显式声明便于阅读)
+    path_params = ("path",)
     
     def __init__(
         self,
         project_root: str = ".",
         working_dir: Optional[str] = None,
-        registry: Optional['ToolRegistry'] = None
+        registry: Optional['ToolRegistry'] = None,
+        policy: Optional[SandboxPolicy] = None,
     ):
         super().__init__(
             name="Read",
             description="读取文件内容或列出目录内容，支持行号范围和元数据缓存",
             expandable=False
         )
-        self.project_root = Path(project_root).resolve()
-        self.working_dir = Path(working_dir).resolve() if working_dir else self.project_root
+        self._init_fs(project_root, working_dir, policy)
         self.registry = registry
     
     def get_parameters(self) -> List[ToolParameter]:
@@ -101,8 +157,10 @@ class ReadTool(Tool):
 
         try:
             # 解析路径
-            full_path = self._resolve_path(path)
-
+            full_path, err = self._prepare_read(path)
+            if err:
+                return err
+            
             if not full_path.exists():
                 return ToolResponse.error(
                     code=ToolErrorCode.NOT_FOUND,
@@ -255,20 +313,8 @@ class ReadTool(Tool):
         dt = datetime.fromtimestamp(timestamp)
         return dt.strftime("%Y-%m-%d %H:%M:%S")
 
-    def _resolve_path(self, path: str) -> Path:
-        """解析相对路径（兼容 Windows 和 Linux）"""
-        # 统一路径分隔符：将反斜杠转换为正斜杠
-        path = path.replace('\\', '/')
 
-        # 如果是绝对路径，直接使用
-        if os.path.isabs(path):
-            return Path(path)
-
-        # 否则相对于 working_dir
-        return self.working_dir / path
-
-
-class WriteTool(Tool):
+class WriteTool(Tool, _FsTool):
     """文件写入工具
 
     功能：
@@ -283,19 +329,22 @@ class WriteTool(Tool):
     - file_mtime_ms: 缓存的 mtime（可选，用于冲突检测）
     """
 
+    is_write_tool = True
+    path_params = ("path",)
+
     def __init__(
         self,
         project_root: str = ".",
         working_dir: Optional[str] = None,
-        registry: Optional['ToolRegistry'] = None
+        registry: Optional['ToolRegistry'] = None,
+        policy: Optional[SandboxPolicy] = None
     ):
         super().__init__(
             name="Write",
             description="创建或覆盖文件，支持冲突检测和原子写入",
             expandable=False
         )
-        self.project_root = Path(project_root).resolve()
-        self.working_dir = Path(working_dir).resolve() if working_dir else self.project_root
+        self._init_fs(project_root, working_dir, policy)
         self.registry = registry
 
     def get_parameters(self) -> List[ToolParameter]:
@@ -339,8 +388,10 @@ class WriteTool(Tool):
             )
 
         try:
-            # 解析路径
-            full_path = self._resolve_path(path)
+            # 解析并授权写目标（越界返回 ACCESS_DENIED）
+            full_path, err = self._prepare_write(path)
+            if err:
+                return err
             backup_path = None
 
             # 检查文件是否存在
@@ -409,14 +460,8 @@ class WriteTool(Tool):
         shutil.copy2(full_path, backup_path)
         return backup_path
 
-    def _resolve_path(self, path: str) -> Path:
-        """解析相对路径"""
-        if os.path.isabs(path):
-            return Path(path)
-        return self.working_dir / path
 
-
-class EditTool(Tool):
+class EditTool(Tool, _FsTool):
     """文件编辑工具
 
     功能：
@@ -431,19 +476,22 @@ class EditTool(Tool):
     - file_mtime_ms: 缓存的 mtime（可选）
     """
 
+    is_write_tool = True
+    path_params = ("path",)
+
     def __init__(
         self,
         project_root: str = ".",
         working_dir: Optional[str] = None,
-        registry: Optional['ToolRegistry'] = None
+        registry: Optional['ToolRegistry'] = None,
+        policy: Optional[SandboxPolicy] = None
     ):
         super().__init__(
             name="Edit",
             description="精确替换文件内容，支持冲突检测和自动备份",
             expandable=False
         )
-        self.project_root = Path(project_root).resolve()
-        self.working_dir = Path(working_dir).resolve() if working_dir else self.project_root
+        self._init_fs(project_root, working_dir, policy)
         self.registry = registry
 
     def get_parameters(self) -> List[ToolParameter]:
@@ -500,9 +548,10 @@ class EditTool(Tool):
             )
 
         try:
-            # 解析路径
-            full_path = self._resolve_path(path)
-
+            # 解析并授权写目标（越界返回 ACCESS_DENIED）
+            full_path, err = self._prepare_write(path)
+            if err:
+                return err
             if not full_path.exists():
                 return ToolResponse.error(
                     code=ToolErrorCode.NOT_FOUND,
@@ -581,14 +630,8 @@ class EditTool(Tool):
         shutil.copy2(full_path, backup_path)
         return backup_path
 
-    def _resolve_path(self, path: str) -> Path:
-        """解析相对路径"""
-        if os.path.isabs(path):
-            return Path(path)
-        return self.working_dir / path
 
-
-class MultiEditTool(Tool):
+class MultiEditTool(Tool, _FsTool):
     """批量编辑工具
 
     功能：
@@ -602,19 +645,22 @@ class MultiEditTool(Tool):
     - file_mtime_ms: 缓存的 mtime（可选）
     """
 
+    is_write_tool = True
+    path_params = ("path",)
+
     def __init__(
         self,
         project_root: str = ".",
         working_dir: Optional[str] = None,
-        registry: Optional['ToolRegistry'] = None
+        registry: Optional['ToolRegistry'] = None,
+        policy: Optional[SandboxPolicy] = None
     ):
         super().__init__(
             name="MultiEdit",
             description="批量替换文件内容，支持原子性和冲突检测",
             expandable=False
         )
-        self.project_root = Path(project_root).resolve()
-        self.working_dir = Path(working_dir).resolve() if working_dir else self.project_root
+        self._init_fs(project_root, working_dir, policy)
         self.registry = registry
 
     def get_parameters(self) -> List[ToolParameter]:
@@ -658,8 +704,10 @@ class MultiEditTool(Tool):
             )
 
         try:
-            # 解析路径
-            full_path = self._resolve_path(path)
+            # 解析并授权写目标（越界返回 ACCESS_DENIED）
+            full_path, err = self._prepare_write(path)
+            if err:
+                return err
 
             if not full_path.exists():
                 return ToolResponse.error(
@@ -753,10 +801,4 @@ class MultiEditTool(Tool):
 
         shutil.copy2(full_path, backup_path)
         return backup_path
-
-    def _resolve_path(self, path: str) -> Path:
-        """解析相对路径"""
-        if os.path.isabs(path):
-            return Path(path)
-        return self.working_dir / path
 

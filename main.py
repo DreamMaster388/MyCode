@@ -11,13 +11,17 @@ import sys
 from dotenv import load_dotenv
 
 load_dotenv()
-
+from agents.fs import build_policy, SandboxMode
 from agents.core.llm import HelloAgentsLLM
 from agents.core.config import Config
 from agents.agent.code_agent import CodeAgent
 from agents.core.streaming import StreamEventType
 from agents.tools.registry import ToolRegistry
 from agents.tools.builtin import ReadTool, WriteTool, EditTool, BashTool, GrepTool, GlobTool
+from agents.core.mode import AgentMode, ModeGuard
+from agents.cli.registry import CommandRegistry
+from agents.cli.builtin import ModeCommand
+
 
 
 SYSTEM_PROMPT = """You are a coding assistant operating in the user's local working directory. You accomplish tasks by calling tools. Follow this three-tier tool-calling hierarchy:
@@ -39,11 +43,13 @@ Keep responses concise: state conclusions directly and include only the necessar
 def build_agent() -> CodeAgent:
     llm = HelloAgentsLLM()
     registry = ToolRegistry()
+    policy = build_policy(SandboxMode.WORKSPACE_WRITE, ".")
+    guard = ModeGuard(AgentMode.BUILD, policy=policy)
     for tool in (
-        ReadTool(),
-        WriteTool(),
-        EditTool(),
-        BashTool(),
+        ReadTool(policy=policy),
+        WriteTool(policy=policy),
+        EditTool(policy=policy),
+        BashTool(policy=policy),
         GrepTool(),
         GlobTool()
     ):
@@ -61,6 +67,7 @@ def build_agent() -> CodeAgent:
         name="CodingAgent",
         llm=llm,
         tool_registry=registry,
+        mode_guard=guard,
         system_prompt=SYSTEM_PROMPT,
         config=config,
         max_steps=25,
@@ -69,11 +76,13 @@ def build_agent() -> CodeAgent:
 
 def main() -> None:
     agent = build_agent()
+    command_register = CommandRegistry()
+    command_register.register(ModeCommand())
     print("=== 编码助手已启动（输入 exit / quit 退出，Ctrl+C 中断）===")
     try:
         while True:
             try:
-                text = input("\n你> ").strip()
+                text = input(f"\n({agent.mode_guard.mode}) 你> ").strip()
             except (EOFError, KeyboardInterrupt):
                 print("\n再见。")
                 break
@@ -81,6 +90,8 @@ def main() -> None:
                 continue
             if text.lower() in ("exit", "quit"):
                 break
+            if command_register.check_command(text.lower(), agent.mode_guard):
+                continue
             try:
                 for event in agent.stream_run(text):
                     if event.type == StreamEventType.THINKING:

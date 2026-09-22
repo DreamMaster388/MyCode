@@ -9,6 +9,7 @@ if TYPE_CHECKING:
 
 
 class GlobTool(Tool):
+    path_params = ("path",)  
     def __init__(self, 
                  project_root: str = ".",
                  registry: Optional['ToolRegistry'] = None):
