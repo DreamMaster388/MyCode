@@ -19,6 +19,8 @@ from agents.core.streaming import StreamEventType
 from agents.tools.registry import ToolRegistry
 from agents.tools.builtin import ReadTool, WriteTool, EditTool, BashTool, GrepTool, GlobTool
 from agents.core.mode import AgentMode, ModeGuard
+from agents.cli.registry import CommandRegistry
+from agents.cli.builtin import ModeCommand
 
 
 
@@ -74,11 +76,13 @@ def build_agent() -> CodeAgent:
 
 def main() -> None:
     agent = build_agent()
+    command_register = CommandRegistry()
+    command_register.register(ModeCommand())
     print("=== 编码助手已启动（输入 exit / quit 退出，Ctrl+C 中断）===")
     try:
         while True:
             try:
-                text = input("\n你> ").strip()
+                text = input(f"\n({agent.mode_guard.mode}) 你> ").strip()
             except (EOFError, KeyboardInterrupt):
                 print("\n再见。")
                 break
@@ -86,6 +90,8 @@ def main() -> None:
                 continue
             if text.lower() in ("exit", "quit"):
                 break
+            if command_register.check_command(text.lower(), agent.mode_guard):
+                continue
             try:
                 for event in agent.stream_run(text):
                     if event.type == StreamEventType.THINKING:
