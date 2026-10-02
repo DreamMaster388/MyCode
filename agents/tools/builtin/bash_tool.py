@@ -13,7 +13,7 @@ class BashTool(Tool):
                  registry: Optional['ToolRegistry'] = None,
                  project_root: str = ".", 
                  policy: Optional[SandboxPolicy] = None):
-        super().__init__(name="bash", 
+        super().__init__(name="Bash", 
                          description="Execute a shell command in the project's " \
                          "working directory and return its output. Use this to run build/test/lint commands, " \
                          "install dependencies, inspect the environment, and automate any task operable from the terminal.", 

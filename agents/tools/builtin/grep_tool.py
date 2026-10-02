@@ -12,7 +12,7 @@ class GrepTool(Tool):
     def __init__(self, 
                  project_root: str = ".",
                  registry: Optional['ToolRegistry'] = None):
-        super().__init__(name="grep", 
+        super().__init__(name="Grep", 
                          description="Search for a pattern in files within the project's working directory and return matching lines.", 
                          expandable=False)
         self.project_root = project_root

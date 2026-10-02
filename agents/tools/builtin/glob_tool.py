@@ -13,7 +13,7 @@ class GlobTool(Tool):
     def __init__(self, 
                  project_root: str = ".",
                  registry: Optional['ToolRegistry'] = None):
-        super().__init__(name="glob", 
+        super().__init__(name="Glob", 
                          description="Search for files matching a pattern in the working directory and return the names of the files found.", 
                          expandable=False)
         self.project_root = project_root

@@ -22,11 +22,31 @@ class ToolRegistry:
         self._tools: dict[str, Tool] = {}
         self._functions: dict[str, dict[str, Any]] = {}
 
+        # 工具名大小写索引: 小写名 -> 注册时的规范名，用于大小写不敏感查找。
+        self._name_index: dict[str, str] = {}
+
         # 文件元数据缓存(用于乐观锁机制)
         self.read_metadata_cache: Dict[str, Dict[str, Any]] = {}
 
         # 熔断器（默认启用）
         self.circuit_breaker = circuit_breaker or CircuitBreaker()
+
+    def _index_name(self, name: str) -> None:
+        """登记工具名到大小写索引；同名不同大小写时告警。"""
+        key = name.lower()
+        existing = self._name_index.get(key)
+        if existing is not None and existing != name:
+            print(f"⚠️ 警告：工具名 '{name}' 与 '{existing}' 大小写冲突，将覆盖前者。")
+        self._name_index[key] = name
+
+    def _canonical(self, name: str) -> Optional[str]:
+        """把任意大小写的工具名解析为注册时的规范名（大小写不敏感）。"""
+        if name in self._tools or name in self._functions:
+            return name
+        canonical = self._name_index.get(name.lower())
+        if canonical is not None and (canonical in self._tools or canonical in self._functions):
+            return canonical
+        return None
 
     def register_tool(self, tool: Tool, auto_expand: bool = True):
         """
@@ -42,9 +62,10 @@ class ToolRegistry:
             if expanded_tools:
                 # 注册所有展开的子工具
                 for sub_tool in expanded_tools:
-                    if sub_tool.name not in self._tools:
+                    if sub_tool.name in self._tools:
                         print(f"⚠️ 警告：工具 '{sub_tool.name}' 已存在，将被覆盖。")
                     self._tools[sub_tool.name] = sub_tool
+                    self._index_name(sub_tool.name)
                 print(f"✅ 工具 '{tool.name}' 已展开为 {len(expanded_tools)} 个独立工具")
                 return
 
@@ -53,6 +74,7 @@ class ToolRegistry:
             print(f"⚠️ 警告：工具 '{tool.name}' 已存在，将被覆盖。")
 
         self._tools[tool.name] = tool
+        self._index_name(tool.name)
         print(f"✅ 工具 '{tool.name}' 已注册。")
 
     def register_function(
@@ -109,26 +131,32 @@ class ToolRegistry:
             "description": description,
             "func": func
         }
+        self._index_name(name)
         print(f"✅ 函数工具 '{name}' 已注册。")
 
     def unregister(self, name: str):
-        """注销工具"""
-        if name in self._tools:
-            del self._tools[name]
-            print(f"🗑️ 工具 '{name}' 已注销。")
-        elif name in self._functions:
-            del self._functions[name]
-            print(f"🗑️ 工具 '{name}' 已注销。")
+        """注销工具（大小写不敏感）"""
+        canonical = self._canonical(name) or name
+        if canonical in self._tools:
+            del self._tools[canonical]
+            self._name_index.pop(canonical.lower(), None)
+            print(f"🗑️ 工具 '{canonical}' 已注销。")
+        elif canonical in self._functions:
+            del self._functions[canonical]
+            self._name_index.pop(canonical.lower(), None)
+            print(f"🗑️ 工具 '{canonical}' 已注销。")
         else:
             print(f"⚠️ 工具 '{name}' 不存在。")
 
     def get_tool(self, name: str) -> Optional[Tool]:
-        """获取Tool对象"""
-        return self._tools.get(name)
+        """获取Tool对象（大小写不敏感）"""
+        canonical = self._canonical(name)
+        return self._tools.get(canonical) if canonical else None
 
     def get_function(self, name: str) -> Optional[Callable]:
-        """获取工具函数"""
-        func_info = self._functions.get(name)
+        """获取工具函数（大小写不敏感）"""
+        canonical = self._canonical(name)
+        func_info = self._functions.get(canonical) if canonical else None
         return func_info["func"] if func_info else None
 
     def execute_tool(self, name: str, input_text) -> ToolResponse:
@@ -143,8 +171,11 @@ class ToolRegistry:
             ToolResponse: 标准化的工具响应对象
         """
 
-        if self.circuit_breaker.is_open(name):
-            status = self.circuit_breaker.get_status(name)
+        # 大小写不敏感解析为注册时的规范名；未注册时回退原名。
+        canonical = self._canonical(name) or name
+
+        if self.circuit_breaker.is_open(canonical):
+            status = self.circuit_breaker.get_status(canonical)
             return ToolResponse.error(
                 code=ToolErrorCode.CIRCUIT_OPEN,
                 message=f"工具 '{name}' 当前被禁用，由于连续失败。{status['recover_in_seconds']} 秒后可用。",
@@ -158,8 +189,8 @@ class ToolRegistry:
         response = None
 
         # 优先查找Tool对象（新协议）
-        if name in self._tools:
-            tool = self._tools[name]
+        if canonical in self._tools:
+            tool = self._tools[canonical]
             try:
                 # 解析参数（支持 JSON 字符串或字典）
                 import json
@@ -184,8 +215,8 @@ class ToolRegistry:
                 )
 
         # 查找函数工具（自动包装为新协议）
-        elif name in self._functions:
-            func = self._functions[name]["func"]
+        elif canonical in self._functions:
+            func = self._functions[canonical]["func"]
             start_time = time.time()
 
             try:
@@ -217,7 +248,7 @@ class ToolRegistry:
             )
 
         # 记录熔断器结果
-        self.circuit_breaker.record_result(name, response)
+        self.circuit_breaker.record_result(canonical, response)
 
         return response
 
@@ -252,6 +283,7 @@ class ToolRegistry:
         """清空所有工具"""
         self._tools.clear()
         self._functions.clear()
+        self._name_index.clear()
         print("🧹 所有工具已清空。")
 
     # ==================== 乐观锁机制支持 ====================

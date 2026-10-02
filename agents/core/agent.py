@@ -504,9 +504,11 @@ class Agent(ABC):
         tool = self.tool_registry.get_tool(tool_name)
 
         # 0) 入口守卫: 按当前模式审查; 被拒则直接返回, 不执行。
-        reason = self.mode_guard.check_tool(tool_name, arguments or {}, tool=tool)
-        if reason:
-            return f"🚫 已拦截 [{tool_name}]: {reason}"
+        #    mode_guard 未配置时跳过守卫(与配置了 guard 的 Agent 行为一致)。
+        if self.mode_guard is not None:
+            reason = self.mode_guard.check_tool(tool_name, arguments or {}, tool=tool)
+            if reason:
+                return f"🚫 已拦截 [{tool_name}]: {reason}"
 
         if tool:
             try:

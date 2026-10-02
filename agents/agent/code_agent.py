@@ -170,7 +170,13 @@ class CodeAgent(Agent):
                 print(f"Executing tool: {tool_name}")
                 result = self._run_and_truncate(tool_name, arg)
                 tool = self.tool_registry.get_tool(tool_name)
-                print(tool.brief(result))
+                if tool is not None:
+                    print(tool.brief(result))
+                else:
+                    # 未知工具名（模型臆造/大小写不符）：结果里已是可读错误，安全打印摘要
+                    preview = "\n".join(result.splitlines()[:5])
+                    print(f"==== {tool_name} tool call result ====\n{preview}\n"
+                          f"==== end {tool_name} tool call result ====")
                 print('\n')
                 self._log("tool_result", {
                     "tool_name": tool_name,
