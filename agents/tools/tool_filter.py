@@ -62,17 +62,17 @@ class ReadOnlyFilter(ToolFilter):
         Args:
             additional_allowed: 额外允许的工具名称列表
         """
-        self.allowed_tools = self.READONLY_TOOLS.copy()
+        self.allowed_tools = {name.lower() for name in self.READONLY_TOOLS}
         if additional_allowed:
-            self.allowed_tools.update(additional_allowed)
+            self.allowed_tools.update(name.lower() for name in additional_allowed)
 
     def filter(self, all_tools: List[str]) -> List[str]:
         """只保留只读工具"""
         return [tool for tool in all_tools if self.is_allowed(tool)]
 
     def is_allowed(self, tool_name: str) -> bool:
-        """检查是否为只读工具"""
-        return tool_name in self.allowed_tools
+        """检查是否为只读工具（大小写不敏感）"""
+        return tool_name.lower() in self.allowed_tools
 
 
 class FullAccessFilter(ToolFilter):
@@ -95,17 +95,17 @@ class FullAccessFilter(ToolFilter):
         Args:
             additional_denied: 额外禁止的工具名称列表
         """
-        self.denied_tools = self.DENIED_TOOLS.copy()
+        self.denied_tools = {name.lower() for name in self.DENIED_TOOLS}
         if additional_denied:
-            self.denied_tools.update(additional_denied)
+            self.denied_tools.update(name.lower() for name in additional_denied)
 
     def filter(self, all_tools: List[str]) -> List[str]:
         """排除危险工具"""
         return [tool for tool in all_tools if self.is_allowed(tool)]
 
     def is_allowed(self, tool_name: str) -> bool:
-        """检查是否允许（不在黑名单中）"""
-        return tool_name not in self.denied_tools
+        """检查是否允许（不在黑名单中，大小写不敏感）"""
+        return tool_name.lower() not in self.denied_tools
 
 
 class CustomFilter(ToolFilter):
@@ -127,8 +127,8 @@ class CustomFilter(ToolFilter):
             denied: 禁止的工具名称列表（黑名单模式）
             mode: 过滤模式，"whitelist"（白名单）或 "blacklist"（黑名单）
         """
-        self.allowed = set(allowed) if allowed else set()
-        self.denied = set(denied) if denied else set()
+        self.allowed = {name.lower() for name in allowed} if allowed else set()
+        self.denied = {name.lower() for name in denied} if denied else set()
         self.mode = mode
 
         if mode not in ("whitelist", "blacklist"):
@@ -139,8 +139,8 @@ class CustomFilter(ToolFilter):
         return [tool for tool in all_tools if self.is_allowed(tool)]
 
     def is_allowed(self, tool_name: str) -> bool:
-        """检查是否允许"""
+        """检查是否允许（大小写不敏感）"""
         if self.mode == "whitelist":
-            return tool_name in self.allowed
+            return tool_name.lower() in self.allowed
         else:  # blacklist
-            return tool_name not in self.denied
+            return tool_name.lower() not in self.denied

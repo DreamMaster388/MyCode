@@ -214,7 +214,7 @@ MyCode/
 │   ├── fs/                     # 自研：路径解析与沙箱策略
 │   ├── observability/          # trace 日志（框架）
 │   ├── skill/                  # 技能加载（框架）
-│   └── tools/                  # 工具基类/注册表（框架）+ bash/grep/glob（自研）
+│   └── tools/                  # 工具基类/注册表（框架）+ Bash/Grep/Glob（自研）
 ├── eval/                       # 自研：SWE-bench 风格评测
 │   ├── instances/              # 评测用例（含合成仓库）
 │   ├── results/                # 结果输出
@@ -241,14 +241,14 @@ MyCode/
 `PASS_TO_PASS` 测试未回归时，实例判定为 `RESOLVED`。
 
 ```bash
-# 运行全部实例
-python eval/run_eval.py --instances eval/instances --out eval/results
+# 运行全部实例（注意用 -m，脚本内含相对导入）
+python -m eval.run_eval --instances eval/instances --out eval/results
 
 # 只跑前 1 个
-python eval/run_eval.py --instances eval/instances --out eval/results --limit 1
+python -m eval.run_eval --instances eval/instances --out eval/results --limit 1
 
 # 指定 agent 最大步数
-python eval/run_eval.py --max-steps 25
+python -m eval.run_eval --max-steps 25
 ```
 
 **实例配置字段**（`eval/instances/*.json`）：
