@@ -84,6 +84,45 @@ class _FsTool:
             return None, ToolResponse.error(code=ToolErrorCode.ACCESS_DENIED, message=str(exc))
         return Path(target.target_key), None
 
+    def _authorize_derived(self, path: Path) -> Optional[ToolResponse]:
+        """对派生路径(临时文件/备份)做二次围栏。
+
+        这些路径由已授权的目标派生而来, 但可能被预置软链劫持(如
+        `foo.py.tmp -> /外部文件` 或 `.backups -> /外部目录`)。此处重新
+        解析 realpath 身份并授权, 软链指向围栏外时被拒。放行返回 None。
+        """
+        try:
+            target = resolve_path(str(path), self.working_dir)
+            authorize_write(self.policy, target)
+        except PathError as exc:
+            return ToolResponse.error(code=ToolErrorCode.INVALID_PARAM, message=str(exc))
+        except SandboxDenied as exc:
+            return ToolResponse.error(code=ToolErrorCode.ACCESS_DENIED, message=str(exc))
+        return None
+
+    def _backup_file(self, full_path: Path):
+        """备份文件; 备份路径受二次围栏保护。返回 (backup_path, error)。
+
+        备份目录与备份文件均需落在可写根内, 且拒绝经软链逃逸到围栏外:
+        任一步被拒即返回 error 且不产生任何落盘。
+        """
+        backup_dir = full_path.parent / ".backups"
+        err = self._authorize_derived(backup_dir)
+        if err:
+            return None, err
+        backup_dir.mkdir(exist_ok=True)
+
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        backup_name = f"{full_path.name}.{timestamp}.bak"
+        backup_path = backup_dir / backup_name
+
+        err = self._authorize_derived(backup_path)
+        if err:
+            return None, err
+
+        shutil.copy2(full_path, backup_path)
+        return backup_path, None
+
 
 class ReadTool(Tool, _FsTool):
     """文件读取工具
@@ -394,6 +433,12 @@ class WriteTool(Tool, _FsTool):
                 return err
             backup_path = None
 
+            # 临时文件路径: 二次围栏, 防止预置软链把内容写到围栏外
+            temp_path = full_path.with_suffix(full_path.suffix + '.tmp')
+            err = self._authorize_derived(temp_path)
+            if err:
+                return err
+
             # 检查文件是否存在
             if full_path.exists():
                 # 获取当前文件元数据
@@ -412,14 +457,15 @@ class WriteTool(Tool, _FsTool):
                             }
                         )
 
-                # 备份原文件
-                backup_path = self._backup_file(full_path)
+                # 备份原文件（备份路径同样受二次围栏保护）
+                backup_path, err = self._backup_file(full_path)
+                if err:
+                    return err
             else:
                 # 确保父目录存在
                 full_path.parent.mkdir(parents=True, exist_ok=True)
 
             # 原子写入（临时文件 + 重命名）
-            temp_path = full_path.with_suffix(full_path.suffix + '.tmp')
             with open(temp_path, 'w', encoding='utf-8') as f:
                 f.write(content)
 
@@ -447,18 +493,6 @@ class WriteTool(Tool, _FsTool):
                 code=ToolErrorCode.INTERNAL_ERROR,
                 message=f"写入文件失败：{str(e)}"
             )
-
-    def _backup_file(self, full_path: Path) -> Path:
-        """备份文件"""
-        backup_dir = full_path.parent / ".backups"
-        backup_dir.mkdir(exist_ok=True)
-
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        backup_name = f"{full_path.name}.{timestamp}.bak"
-        backup_path = backup_dir / backup_name
-
-        shutil.copy2(full_path, backup_path)
-        return backup_path
 
 
 class EditTool(Tool, _FsTool):
@@ -589,8 +623,10 @@ class EditTool(Tool, _FsTool):
             # 执行替换
             new_content = content.replace(old_string, new_string)
 
-            # 备份原文件
-            backup_path = self._backup_file(full_path)
+            # 备份原文件（备份路径受二次围栏保护）
+            backup_path, err = self._backup_file(full_path)
+            if err:
+                return err
 
             # 写入新内容
             with open(full_path, 'w', encoding='utf-8') as f:
@@ -617,18 +653,6 @@ class EditTool(Tool, _FsTool):
                 code=ToolErrorCode.INTERNAL_ERROR,
                 message=f"编辑文件失败：{str(e)}"
             )
-
-    def _backup_file(self, full_path: Path) -> Path:
-        """备份文件"""
-        backup_dir = full_path.parent / ".backups"
-        backup_dir.mkdir(exist_ok=True)
-
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        backup_name = f"{full_path.name}.{timestamp}.bak"
-        backup_path = backup_dir / backup_name
-
-        shutil.copy2(full_path, backup_path)
-        return backup_path
 
 
 class MultiEditTool(Tool, _FsTool):
@@ -760,8 +784,10 @@ class MultiEditTool(Tool, _FsTool):
             for edit in edits:
                 content = content.replace(edit["old_string"], edit["new_string"])
 
-            # 备份原文件
-            backup_path = self._backup_file(full_path)
+            # 备份原文件（备份路径受二次围栏保护）
+            backup_path, err = self._backup_file(full_path)
+            if err:
+                return err
 
             # 写入新内容
             with open(full_path, 'w', encoding='utf-8') as f:
@@ -789,16 +815,4 @@ class MultiEditTool(Tool, _FsTool):
                 code=ToolErrorCode.INTERNAL_ERROR,
                 message=f"批量编辑失败：{str(e)}"
             )
-
-    def _backup_file(self, full_path: Path) -> Path:
-        """备份文件"""
-        backup_dir = full_path.parent / ".backups"
-        backup_dir.mkdir(exist_ok=True)
-
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        backup_name = f"{full_path.name}.{timestamp}.bak"
-        backup_path = backup_dir / backup_name
-
-        shutil.copy2(full_path, backup_path)
-        return backup_path
 
