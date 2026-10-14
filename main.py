@@ -49,7 +49,7 @@ def build_agent() -> CodeAgent:
         ReadTool(policy=policy),
         WriteTool(policy=policy),
         EditTool(policy=policy),
-        BashTool(policy=policy),
+        BashTool(policy=policy, policy_provider=guard.sandbox_policy),
         GrepTool(),
         GlobTool()
     ):
