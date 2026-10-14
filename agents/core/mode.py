@@ -90,6 +90,25 @@ class ModeGuard:
         if self._explicit_policy is None:
             self.policy = _default_policy(mode, self.project_root)
 
+    def sandbox_policy(self) -> SandboxPolicy:
+        """当前模式对应的沙箱策略(供 bash 内核围栏使用)。
+
+        - plan -> read-only: 写不进去(这才是 plan"无文件改动"的真正保证);
+        - build -> 沿用配置策略的模式(通常 workspace-write, 也可能是 danger-full-access)。
+        工作区根与额外可写根保持不变。
+        """
+        if self.mode == AgentMode.PLAN:
+            mode = SandboxMode.READ_ONLY
+        elif isinstance(self.policy.mode, SandboxMode):
+            mode = self.policy.mode
+        else:
+            mode = SandboxMode(self.policy.mode)
+        return SandboxPolicy(
+            mode=mode,
+            workspace_root=self.policy.workspace_root,
+            extra_writable=self.policy.extra_writable,
+        )
+
     def check_tool(
         self,
         tool_name: str,
