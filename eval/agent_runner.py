@@ -55,7 +55,7 @@ def build_agent(workdir: str, max_steps: int = 25) -> CodeAgent:
         ReadTool(project_root=workdir, policy=policy),
         WriteTool(project_root=workdir, policy=policy),
         EditTool(project_root=workdir, policy=policy),
-        BashTool(project_root=workdir, policy=policy),
+        BashTool(project_root=workdir, policy=policy, policy_provider=guard.sandbox_policy),
         GrepTool(project_root=workdir),
         GlobTool(project_root=workdir),
     ):

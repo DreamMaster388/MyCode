@@ -107,7 +107,8 @@ python -m agents
 返回 `None` 放行，返回字符串表示拦截原因（作为错误反馈给模型）。
 
 - **plan 模式**
-  - 非 bash 工具：仅放行只读白名单（`Read / Grep / Glob` 等）内的工具。
+  - 非 bash 工具：仅放行只读白名单（`Read / LS / Glob / Grep / Skill`，
+    含对应 `*Tool` 变体）内的工具。
   - bash：整棵命令树必须“全只读”才放行；控制流（`if/for/while`）直接拒绝；
     写重定向与提权/下载/安装等风险标记均拒绝；对 `$()` 与子 shell 递归审查，
     防止 `ls $(rm -rf /)` 这类“外层只读、内层破坏”的绕过。
@@ -115,7 +116,8 @@ python -m agents
 - **build 模式**
   - 工具：写工具对每个路径参数做写路径沙箱校验。
   - bash：拦截高危命令（提权 `privilege`、破坏性 `footgun`、任意下载 `download`），
-    允许依赖安装（`pkg_install`），并对写重定向目标做路径沙箱校验。
+    允许依赖安装（`pkg_install`），并对写重定向目标做路径沙箱校验；
+    此外 bash 统一在**内核写围栏**内执行（见第 4 节）。
 
 ### 2. 命令审计 `CommandAudit`
 
@@ -142,6 +144,29 @@ python -m agents
 
 工具通过基类能力元数据 `is_write_tool` 与 `path_params`
 （`agents/tools/base.py`）声明自身是否为写工具、哪些参数是路径。
+
+### 4. 内核写围栏 `agents/sandbox/`
+
+`ModeGuard` 是执行前的策略闸门；`agents/sandbox/` 则是**内核级硬边界**：
+bash 命令被包装后执行，写入位置由内核保证，与命令字符串如何书写无关。
+
+- 后端：`LandlockBackend`（ctypes 启动器 `landlock_exec.py`，Linux 基线）与
+  `BwrapBackend`（挂载 / PID 命名空间，可选）；`SandboxProvider` 默认按
+  `bwrap -> landlock` 选首个可用后端，**全部不可用则 fail-closed 拒绝执行**。
+- 模式映射：`plan -> read-only`（无写根，改不了任何文件，这是 plan 的真正保证）；
+  `build -> workspace-write`（仅工作区 + 额外可写根 + 系统临时目录可写，`/dev/null`
+  放行）；`danger-full-access` 不包装。
+- 只处理**写**相关权限（write / remove / make / refer / truncate），读与执行不受
+  影响，因此无需为整个文件系统构造读规则。
+- Landlock 规则对子进程继续生效，天然覆盖 `env` / `xargs` / `sh -c` / `$(...)` /
+  重定向等所有派生写法（例如 `env rm -rf /` 也会被内核拒绝）。
+- 拒绝识别：非零退出且 stderr 命中方言（`permission denied` 等）时，返回
+  `[sandbox: file access denied under <mode> mode]`，提示模型这是策略拒绝、不要换
+  写法绕过。为稳定匹配，沙箱子进程强制 `LC_ALL=C`。
+- Scripts 采用 `close_fds=True` 执行，避免父进程已打开的可写 fd 被继承而绕过围栏。
+
+**范围与已知边界**：只保证 **FS 写**，且只覆盖被包装的 **bash 子进程**；
+Python 文件工具仍走应用层围栏；**读、网络、资源耗尽**不在本期范围。
 
 ---
 
@@ -174,6 +199,7 @@ python -m agents
 | `agents/fs/target.py` | 路径解析与身份判定 seam（`FsTarget`/`resolve_path`/`is_within`） |
 | `agents/fs/policy.py` | 沙箱模式、策略与写授权判定（`SandboxPolicy`/`authorize_write`） |
 | `agents/fs/__init__.py` | 文件系统子包导出 |
+| `agents/sandbox/` | 内核写围栏：`SandboxProvider` + `LandlockBackend`/`BwrapBackend` + `landlock_exec.py` 启动器 |
 | `agents/cli/base.py` | CLI 命令抽象基类 `Command` |
 | `agents/cli/registry.py` | 命令注册表 `CommandRegistry`，`/` 前缀识别 |
 | `agents/cli/builtin/mode_command.py` | `/mode` 命令实现 |
@@ -212,6 +238,7 @@ MyCode/
 │   ├── context/                # 上下文构建/历史/token 计数/截断（框架）
 │   ├── core/                   # LLM、Agent 基类、流式、配置（框架）+ mode/command_audit（自研）
 │   ├── fs/                     # 自研：路径解析与沙箱策略
+│   ├── sandbox/                # 自研：内核写围栏后端（Landlock/bwrap）
 │   ├── observability/          # trace 日志（框架）
 │   ├── skill/                  # 技能加载（框架）
 │   └── tools/                  # 工具基类/注册表（框架）+ Bash/Grep/Glob（自研）
@@ -224,7 +251,9 @@ MyCode/
 │   └── run_eval.py             # 批量运行 CLI
 ├── test/                       # 自研：pytest 单测
 │   ├── core/test_command_audit.py
-│   └── fs/test_policy.py
+│   ├── core/test_mode.py
+│   ├── fs/test_policy.py
+│   └── sandbox/                # 内核写围栏测试
 ├── memory/traces/              # 运行期 trace 产物
 ├── log/                        # 日志
 └── tool-output/                # 工具完整输出（超长时）
@@ -277,7 +306,9 @@ pytest test/
 当前包含：
 
 - `test/core/test_command_audit.py`：命令审计、风险标记、写重定向判定；
-- `test/fs/test_policy.py`：沙箱策略与可写根。
+- `test/core/test_mode.py`：plan / build 模式判定与规则函数；
+- `test/fs/test_policy.py`：沙箱策略与可写根；
+- `test/sandbox/`：Landlock 启动器、后端选择与 bash 内核围栏集成。
 
 ---
 
