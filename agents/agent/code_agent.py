@@ -88,6 +88,9 @@ class CodeAgent(Agent):
         self._last_transcript = list(messages)
         schemas = self._build_tool_schemas()
 
+        # 同步来源记录：用户输入是本次运行的第一条消息（id 最前）
+        self._record_llm_message({"role": "user", "content": input_text})
+
         final_text = ""
         status = "success"
         step = 0
@@ -137,8 +140,10 @@ class CodeAgent(Agent):
                 status = "success"
                 break
 
-            # 3) 把助手消息追加进上下文
-            messages.append(self._assistant_msg(_StreamResponse(content, final_calls)))
+            # 3) 把助手消息追加进上下文（同时同步进历史）
+            assistant_msg = self._assistant_msg(_StreamResponse(content, final_calls))
+            messages.append(assistant_msg)
+            self._record_llm_message(assistant_msg)
 
             # 4) 顺序执行工具并回填 tool 消息
             for tc in final_calls:
@@ -160,6 +165,9 @@ class CodeAgent(Agent):
                         "result": result
                     }, step=step, run=run_index)
                     messages.append({"role": "tool", "tool_call_id": tool_call_id, "content": result})
+                    self._record_llm_message(
+                        {"role": "tool", "tool_call_id": tool_call_id, "content": result}
+                    )
                     continue
 
                 self._log("tool_call",{
@@ -184,6 +192,9 @@ class CodeAgent(Agent):
                     "result": result
                 }, step=step, run=run_index)
                 messages.append({"role": "tool", "tool_call_id": tool_call_id, "content": result})
+                self._record_llm_message(
+                    {"role": "tool", "tool_call_id": tool_call_id, "content": result}
+                )
 
             # 5) token 预算检查（步数上限由 while 条件处理）
             if self._budget_exhausted(step, tokens_used):
@@ -196,8 +207,8 @@ class CodeAgent(Agent):
             status = "max_steps"
 
         # ------------ 运行结束 -------------
-        # 保存到历史
-        self._persist_history(input_text, final_text)
+        # 保存到历史：final_text 是本次运行的最后一条消息（id 最后）
+        self._record_llm_message({"role": "assistant", "content": final_text})
         self._session_metadata["total_steps"] = step
         self._session_metadata["total_tokens"] = tokens_used
         self._session_metadata["duration_seconds"] = (datetime.now() - session_started).total_seconds()
@@ -297,9 +308,9 @@ class CodeAgent(Agent):
         # 加入系统消息
         if self.system_prompt:
             messages.append({"role": "system", "content": self.system_prompt})
-        # 加入完整历史信息
+        # 加入完整历史信息（tool_call_id / tool_calls 一并还原）
         for msg in self.history_manager.get_history():
-            messages.append({"role": msg.role, "content": msg.content})
+            messages.append(msg.to_llm_dict())
         # 加入用户输入
         messages.append({"role": "user", "content": input_text})
         return messages
@@ -323,9 +334,14 @@ class CodeAgent(Agent):
             ]
         }
 
-    def _persist_history(self, input_text: str, final_text: str) -> None:
-            self.add_message(Message(input_text, "user"))
-            self.add_message(Message(final_text, "assistant"))
+    def _record_llm_message(self, message: Dict[str, Any]) -> Message:
+        """ 把一条"发给大模型的消息"同步写入历史（按顺序分配 id）
+
+        注意：system 提示词属于 Agent 静态配置，不写入历史。
+        """
+        recorded = Message.from_llm_dict(message)
+        self.add_message(recorded)
+        return recorded
 
     # -------------------- 可观测性 --------------------
     def _log(self, event: str,  payload: Dict[str, Any], step: Optional[int] = None, run: Optional[int] = None) -> None:

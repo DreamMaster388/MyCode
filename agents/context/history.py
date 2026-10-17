@@ -2,7 +2,8 @@
 
 职责：
 - 消息追加（只追加，不编辑，缓存友好）
-- 历史压缩（生成 summary + 保留最近轮次）
+- 按追加顺序为每条消息分配唯一 id
+- 构建发送给 LLM 的上下文（build_context，暂为空实现）
 - 会话序列化/反序列化
 - 轮次边界检测
 """
@@ -17,22 +18,22 @@ class HistoryManager:
 
     特性：
     - 只追加，不编辑（缓存友好）
-    - 自动压缩历史（summary + 保留最近轮次）
+    - 追加时自动分配自增 id（从 0 开始）
     - 支持会话保存/加载
 
     用法示例：
     ```python
     manager = HistoryManager(min_retain_rounds=10)
 
-    # 追加消息
+    # 追加消息（自动分配 id）
     manager.append(Message("hello", "user"))
     manager.append(Message("hi", "assistant"))
 
     # 获取历史
     history = manager.get_history()
 
-    # 压缩历史
-    manager.compress("这是前面对话的摘要")
+    # 构建发送给 LLM 的上下文
+    context = manager.build_context()
 
     # 序列化
     data = manager.to_dict()
@@ -50,21 +51,36 @@ class HistoryManager:
         """初始化历史管理器
 
         Args:
-            min_retain_rounds: 压缩时保留的最小完整轮次数
-            compression_threshold: 压缩阈值（暂未使用，预留）
+            min_retain_rounds: 摘要时保留的最小完整轮次数
+            compression_threshold: 阈值（暂未使用，预留）
         """
 
         self._history: List[Message] = []
         self.min_retain_rounds = min_retain_rounds
         self.compression_threshold = compression_threshold
+        # 下一个待分配的 id（从 0 开始，只增不减，保证 id 唯一且递增）
+        self._next_id: int = 0
 
-    def append(self, message: Message) -> None:
+    def append(self, message: Message) -> Message:
         """追加消息（只追加，不编辑）
+
+        未携带 id 的消息按追加顺序分配自增 id；已携带 id 的消息保留原 id，
+        并把 _next_id 推进到其后，避免后续分配重复。
 
         Args:
             message: 要追加的消息
+
+        Returns:
+            追加后的消息（已带 id）
         """
+        if message.id is None:
+            message.id = self._next_id
+            self._next_id += 1
+        elif message.id >= self._next_id:
+            self._next_id = message.id + 1
+
         self._history.append(message)
+        return message
 
     def get_history(self) -> List[Message]:
         """获取历史副本
@@ -111,38 +127,16 @@ class HistoryManager:
                 boundaries.append(i)
         return boundaries
 
-    def compress(self, summary: str) -> None:
-        """压缩历史
+    def build_context(self) -> List[Dict[str, Any]]:
+        """根据完整历史构建"该发给模型的内容"
 
-        将旧历史替换为 summary 消息，保留最近 N 轮完整对话
+        说明：本步骤只做来源记录，上下文构建留待后续步骤实现，
+        当前为空实现，调用方不得依赖其返回值。
 
-        Args:
-            summary: 历史摘要文本
+        Returns:
+            发送给 LLM 的消息字典列表（当前固定为空列表）
         """
-        # 检查是否有足够的轮次需要压缩
-        rounds = self.estimate_rounds()
-        if rounds < self.min_retain_rounds:
-            return
-
-        # 找到所有轮次边界
-        boundaries = self.find_round_boundaries()
-
-        # 计算要保留的起始位置（保留最近 min_retain_rounds 轮）
-        if len(boundaries) > self.min_retain_rounds:
-            keep_from_index = boundaries[-self.min_retain_rounds]
-        else:
-            # 不足最小轮次，不压缩
-            return
-
-        # 生成 summary 消息
-        summary_msg = Message(
-            content=f"## Archived Session Summary\n{summary}",
-            role="summary",
-            metadata={"compressed_at": datetime.now().isoformat()}
-        )
-
-        # 替换历史：summary + 保留的最近轮次
-        self._history = [summary_msg] + self._history[keep_from_index:]
+        return []
 
     def to_dict(self) -> Dict[str, Any]:
         """序列化为字典（用于会话保存）
@@ -152,6 +146,7 @@ class HistoryManager:
         """
         return {
             "history": [msg.to_dict() for msg in self._history],
+            "next_id": self._next_id,
             "created_at": datetime.now().isoformat(),
             "rounds": self.estimate_rounds()
         }
@@ -166,5 +161,20 @@ class HistoryManager:
             Message.from_dict(msg_data)
             for msg_data in data.get("history", [])
         ]
+        # 已有 id 的最大值（空历史时为 -1，下一个 id 即 0）
+        existing_max = max(
+            (msg.id for msg in self._history if msg.id is not None),
+            default=-1
+        )
+        # 优先使用保存的 next_id，但不得小于已有 id 的最大值 + 1
+        raw_next = data.get("next_id")
+        next_id = existing_max + 1 if raw_next is None else int(raw_next)
+        next_id = max(next_id, existing_max + 1)
+        # 旧格式记录可能没有 id：按顺序补号，保证加载后 id 完备且唯一
+        for msg in self._history:
+            if msg.id is None:
+                msg.id = next_id
+                next_id += 1
+        self._next_id = next_id
 
 
