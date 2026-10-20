@@ -16,7 +16,7 @@ class Agent(ABC):
     """Agent基类
 
     集成能力：
-    - HistoryManager: 历史管理与压缩
+    - HistoryManager: 历史管理与 token 计量
     - ObservationTruncator: 工具输出截断
     - TraceLogger: 可观测性（JSONL + HTML）
     - ToolRegistry: 工具管理（可选）
@@ -53,7 +53,8 @@ class Agent(ABC):
 
         self.history_manager = HistoryManager(
             min_retain_rounds=self.config.min_retain_rounds,
-            compression_threshold=self.config.compression_threshold
+            compression_threshold=self.config.compression_threshold,
+            context_window=self.config.context_window
         )
 
         self.truncator = ObservationTruncator(
@@ -62,11 +63,6 @@ class Agent(ABC):
             truncate_direction=self.config.tool_output_truncate_direction,
             output_dir=self.config.tool_output_dir
         )
-
-        # 新增：Token 计数器（缓存 + 增量计算）
-        from ..context.token_counter import TokenCounter
-        self.token_counter = TokenCounter(model=self.llm.model)
-        self._history_token_count = 0 # 缓存历史token数
 
         # 新增：可观测性组件
         from ..observability.trace_logger import TraceLogger
@@ -155,184 +151,8 @@ class Agent(ABC):
 
 
     def add_message(self, message: Message):
-        """添加消息到历史记录
-
-        自动检查是否需要压缩历史
-        """
+        """添加消息到历史记录"""
         self.history_manager.append(message)
-
-        # 增量更新Token计数
-        new_tokens = self.token_counter.count_message(message)
-        self._history_token_count += new_tokens
-
-        # 检查是否需要压缩
-        if self._should_compress():
-            self._compress_history()
-
-    def _should_compress(self) -> bool:
-        """判断是否需要压缩历史
-
-        基于缓存的 Token 数判断（高性能）
-        使用增量计算，避免重复遍历历史
-
-        Returns:
-            是否需要压缩
-        """
-        threshold = int(self.config.compression_threshold * self.config.context_window)
-        return self._history_token_count > threshold
-
-    def _compress_history(self):
-        """压缩历史
-
-        默认使用简单摘要策略
-        如果启用 enable_smart_compression，子类可以重写此方法调用 LLM 生成智能摘要
-        """
-        history = self.history_manager.get_history()
-
-        if self.config.enable_smart_compression:
-            # 智能摘要（需要子类实现）
-            summary = self._generate_smart_summary(history)
-        else:
-            # 简单摘要
-            summary = self._generate_simple_summary(history)
-
-        # 重新计算 Token 数（压缩后）
-        new_history = self.history_manager.get_history()
-        self._history_token_count = self.token_counter.count_messages(new_history)
-
-    def _generate_simple_summary(self, history: List[Message]) -> str:
-        """生成简单摘要（统计信息）
-
-        Args:
-            history: 历史消息列表
-
-        Returns:
-            摘要文本
-        """
-        rounds = self.history_manager.estimate_rounds()
-        user_msgs = sum(1 for msg in history if msg.role == "user")
-        assistant_msgs = sum(1 for msg in history if msg.role == "assistant")
-
-        return f"""此会话包含 {rounds} 轮对话：
-- 用户消息：{user_msgs} 条
-- 助手消息：{assistant_msgs} 条
-- 总消息数：{len(history)} 条
-
-（历史已压缩，保留最近 {self.config.min_retain_rounds} 轮完整对话）"""
-
-    def _generate_smart_summary(self, history: List[Message]) -> str:
-        """生成智能摘要（调用 LLM）
-
-        使用轻量 LLM 生成结构化摘要，保留关键信息：
-        - 任务目标
-        - 关键决策
-        - 已完成工作
-        - 待处理事项
-        - 重要发现
-
-        Args:
-            history: 历史消息列表
-
-        Returns:
-            摘要文本
-        """
-
-        # 1. 提取要压缩的历史片段
-        boundaries = self.history_manager.find_round_boundaries()
-        if len(boundaries) <= self.config.min_retain_rounds:
-            return self._generate_simple_summary(history)
-
-        # 保留最近 N 轮，压缩之前的
-        keep_from_index = boundaries[-self.config.min_retain_rounds]
-        to_compress = history[:keep_from_index]
-
-        if not to_compress:
-            return self._generate_simple_summary(history)
-
-        # 2. 构建摘要 Prompt
-        history_text = self._format_history_for_summary(to_compress)
-
-        summary_prompt = f"""请将以下对话历史压缩为结构化摘要，保留关键信息：
-
-        ## 对话历史
-        {history_text}
-
-        ## 摘要要求
-        1. **任务目标**：用户想要完成什么？
-        2. **关键决策**：做了哪些重要决定？
-        3. **已完成工作**：完成了哪些任务？（列表形式）
-        4. **待处理事项**：还有什么未完成？
-        5. **重要发现**：有哪些关键信息或问题？
-
-        请用简洁的中文输出，每部分不超过 3 行。"""
-
-        # 3. 调用轻量 LLM（节省成本）
-        try:
-            summary_llm = self._get_summary_llm()
-
-            messages = [
-                {"role": "system", "content": "你是一个专业的对话摘要助手，擅长提取关键信息。"},
-                {"role": "user", "content": summary_prompt}
-            ]
-
-            # 非流式调用，快速获取结果
-            summary = summary_llm.invoke(
-                messages,
-                temperature=self.config.summary_temperature,
-                max_tokens=self.config.summary_max_tokens
-            )
-
-            return f"""## 历史摘要（{len(to_compress)} 条消息）
-        {summary}
-
-        ---
-        （已压缩，保留最近 {self.config.min_retain_rounds} 轮完整对话）"""
-
-        except Exception as e:
-            # 回退到简单摘要
-            print(f"⚠️ 智能摘要生成失败: {e}，使用简单摘要")
-            return self._generate_simple_summary(history)
-
-    def _format_history_for_summary(self, history: List[Message]) -> str:
-        """格式化历史消息用于摘要生成
-
-        Args:
-            history: 历史消息列表
-
-        Returns:
-            格式化后的历史文本
-        """
-        formatted_lines = []
-        for msg in history:
-            # 截断过长消息（避免摘要 Prompt 过大）
-            content = msg.content[:500] if len(msg.content) > 500 else msg.content
-            formatted_lines.append(f"[{msg.role}]: {content}")
-
-        return "\n\n".join(formatted_lines)
-
-    def _get_summary_llm(self):
-        """获取摘要专用 LLM（轻量模型）
-
-        使用独立的轻量 LLM 实例，节省成本
-
-        Returns:
-            HelloAgentsLLM 实例
-        """
-        if not hasattr(self, '_summary_llm'):
-            from .llm import HelloAgentsLLM
-
-            # 使用配置中的轻量模型
-            provider = self.config.summary_llm_provider
-            model = self.config.summary_llm_model
-
-            self._summary_llm = HelloAgentsLLM(
-                provider=provider,
-                model=model,
-                temperature=self.config.summary_temperature,
-                max_tokens=self.config.summary_max_tokens
-            )
-
-        return self._summary_llm
 
     def __str__(self) -> str:
         return f"Agent(name={self.name}, model={self.llm.model})"

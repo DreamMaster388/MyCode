@@ -127,6 +127,14 @@ class CodeAgent(Agent):
             content = "".join(content_parts)
             reasoning_content = "".join(reasoning_parts)
             tokens_used += usage.get("total_tokens", 0) if usage else 0
+
+            # 计量：模型成功返回后，用其精确输入 token 校准历史计量基线。
+            # 此刻历史即本次请求回放的历史 + 当前用户输入（system 提示词不在历史中，
+            # 因此 prompt_tokens 是略偏保守的上界）
+            prompt_tokens = (usage or {}).get("prompt_tokens")
+            if isinstance(prompt_tokens, int) and prompt_tokens > 0:
+                self.history_manager.record_prompt_tokens(prompt_tokens)
+
             self._log("model_output", {
                 "content": content,
                 "tool_calls": len(final_calls) if final_calls else 0,

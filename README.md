@@ -182,7 +182,7 @@ Python 文件工具仍走应用层围栏；**读、网络、资源耗尽**不在
 | --- | --- |
 | `agents/core/` | `agent.py`、`config.py`、`exceptions.py`、`lifecycle.py`、`llm.py`、`llm_adapters.py`、`llm_error.py`、`llm_response.py`、`message.py`、`session_store.py`、`streaming.py` |
 | `agents/agent/` | `simple_agent.py`、`react_agent.py`、`reflection_agent.py`、`plan_solve_agent.py` |
-| `agents/context/` | `builder.py`、`history.py`、`token_counter.py`、`truncator.py` |
+| `agents/context/` | `builder.py`、`history.py`、`truncator.py` |
 | `agents/observability/` | `trace_logger.py` |
 | `agents/skill/` | `loader.py` |
 | `agents/tools/` | `base.py`、`registry.py`、`response.py`、`errors.py`、`circuit_breaker.py`、`tool_filter.py` |
@@ -235,7 +235,7 @@ MyCode/
 ├── agents/
 │   ├── agent/                  # 智能体：simple/react/reflection/plan_solve（框架）、code_agent（自研）
 │   ├── cli/                    # 自研：CLI 命令体系
-│   ├── context/                # 上下文构建/历史/token 计数/截断（框架）
+│   ├── context/                # 上下文构建/历史（含 token 计量）/截断（框架）
 │   ├── core/                   # LLM、Agent 基类、流式、配置（框架）+ mode/command_audit（自研）
 │   ├── fs/                     # 自研：路径解析与沙箱策略
 │   ├── sandbox/                # 自研：内核写围栏后端（Landlock/bwrap）
@@ -300,7 +300,7 @@ python -m eval.run_eval --max-steps 25
 ## 测试
 
 ```bash
-pytest test/
+python -m pytest test/
 ```
 
 当前包含：

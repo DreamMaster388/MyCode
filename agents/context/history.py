@@ -6,6 +6,7 @@
 - 构建发送给 LLM 的上下文（build_context，暂为空实现）
 - 会话序列化/反序列化
 - 轮次边界检测
+- token 计量（真实输入 token + 增量估算，判断是否需要压缩）
 """
 
 from typing import List, Optional, Dict, Any
@@ -20,6 +21,7 @@ class HistoryManager:
     - 只追加，不编辑（缓存友好）
     - 追加时自动分配自增 id（从 0 开始）
     - 支持会话保存/加载
+    - token 计量：真实输入 token 校准 + 未计量消息的增量估算
 
     用法示例：
     ```python
@@ -46,20 +48,27 @@ class HistoryManager:
     def __init__(
         self,
         min_retain_rounds: int = 10,
-        compression_threshold: float = 0.8
+        compression_threshold: float = 0.8,
+        context_window: int = 128000
     ):
         """初始化历史管理器
 
         Args:
             min_retain_rounds: 摘要时保留的最小完整轮次数
-            compression_threshold: 阈值（暂未使用，预留）
+            compression_threshold: 压缩阈值（已用 token 超过窗口大小 * 阈值时需压缩）
+            context_window: 模型上下文窗口大小（tokens）
         """
 
         self._history: List[Message] = []
         self.min_retain_rounds = min_retain_rounds
         self.compression_threshold = compression_threshold
+        self.context_window = context_window
         # 下一个待分配的 id（从 0 开始，只增不减，保证 id 唯一且递增）
         self._next_id: int = 0
+        # 大模型侧返回的真实输入 token 数（覆盖 _history[0, _history_token_count_idx)）
+        self._history_token_count: int = 0
+        # 上述 token 数对应的历史区间右边界，即已计量区间为 _history[0, idx)
+        self._history_token_count_idx: int = 0
 
     def append(self, message: Message) -> Message:
         """追加消息（只追加，不编辑）
@@ -91,8 +100,10 @@ class HistoryManager:
         return self._history.copy()
 
     def clear(self) -> None:
-        """清空历史"""
+        """清空历史（同时重置 token 计量）"""
         self._history.clear()
+        self._history_token_count = 0
+        self._history_token_count_idx = 0
 
     def estimate_rounds(self) -> int:
         """预估完整轮次数
@@ -138,6 +149,48 @@ class HistoryManager:
         """
         return []
 
+    # -------------------- token 计量 --------------------
+
+    def estimate_message_tokens(self, message: Message) -> int:
+        """估算单条消息消耗的 token
+
+        按字符数估算（1 token ≈ 4 字符），只用于未计量区间的增量估算。
+
+        Args:
+            message: 待估算的消息
+
+        Returns:
+            估算的 token 数
+        """
+        return len(str(message)) // 4
+
+    def should_compress(self) -> bool:
+        """判断当前历史是否需要压缩
+
+        口径：已计量的真实输入 token（覆盖 _history[0, idx)）
+        + idx 之后各消息的估算 token > 上下文窗口 * 压缩阈值。
+
+        Returns:
+            是否需要压缩
+        """
+        total = self._history_token_count
+        idx = min(max(self._history_token_count_idx, 0), len(self._history))
+        for message in self._history[idx:]:
+            total += self.estimate_message_tokens(message)
+        return total > self.context_window * self.compression_threshold
+
+    def record_prompt_tokens(self, prompt_tokens: int) -> None:
+        """用大模型返回的真实输入 token 数校准计量基线
+
+        校准后，已计量区间推进到当前完整历史（即本次请求回放的历史 + 当前输入）。
+        注意 prompt_tokens 含 system 提示词与工具 schema 的开销，因此略偏保守。
+
+        Args:
+            prompt_tokens: 大模型返回的输入 token 数
+        """
+        self._history_token_count = prompt_tokens
+        self._history_token_count_idx = len(self._history)
+
     def to_dict(self) -> Dict[str, Any]:
         """序列化为字典（用于会话保存）
 
@@ -161,6 +214,10 @@ class HistoryManager:
             Message.from_dict(msg_data)
             for msg_data in data.get("history", [])
         ]
+        # 加载后的历史没有对应的真实 prompt 计量，计量基线归零，
+        # 全部按估算值参与 should_compress 判断
+        self._history_token_count = 0
+        self._history_token_count_idx = 0
         # 已有 id 的最大值（空历史时为 -1，下一个 id 即 0）
         existing_max = max(
             (msg.id for msg in self._history if msg.id is not None),
