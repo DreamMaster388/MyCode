@@ -72,8 +72,12 @@ class Message(BaseModel):
         )
 
     def to_llm_dict(self) -> Dict[str, Any]:
-        """ 转为"发给大模型的消息"字典 """
-        payload: Dict[str, Any] = {'role': self.role, 'content': self.content}
+        """ 转为"发给大模型的消息字典"
+
+        summary 不是合法的 API 角色，发送时降级为 user（内容即摘要正文）。
+        """
+        role = "user" if self.role == "summary" else self.role
+        payload: Dict[str, Any] = {'role': role, 'content': self.content}
         if self.role == 'assistant' and self.tool_calls:
             payload['tool_calls'] = self.tool_calls
         if self.role == 'tool' and self.tool_call_id:

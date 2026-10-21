@@ -54,7 +54,9 @@ class Agent(ABC):
         self.history_manager = HistoryManager(
             min_retain_rounds=self.config.min_retain_rounds,
             compression_threshold=self.config.compression_threshold,
-            context_window=self.config.context_window
+            context_window=self.config.context_window,
+            config=self.config,
+            llm=self.llm
         )
 
         self.truncator = ObservationTruncator(

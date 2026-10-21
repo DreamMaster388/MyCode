@@ -8,6 +8,7 @@ from ..core.llm_response import LLMStreamChunkType, ToolCall
 from ..core.message import Message
 from ..core.streaming import StreamEvent, StreamEventType
 from ..core.lifecycle import LifecycleHook
+from ..context.history import NotEnoughRoundsError
 
 
 DEFAULT_CODEC_SYSTEM_PROMPT = (
@@ -204,6 +205,9 @@ class CodeAgent(Agent):
                     {"role": "tool", "tool_call_id": tool_call_id, "content": result}
                 )
 
+            # 4.5) 摘要判断：上下文超阈值时把更早的轮次压缩为 summary 消息
+            self._summarize_if_needed(step=step, run=run_index)
+
             # 5) token 预算检查（步数上限由 while 条件处理）
             if self._budget_exhausted(step, tokens_used):
                 final_text = self._conclude(messages, schemas, step, run_index, **kwargs)
@@ -311,13 +315,13 @@ class CodeAgent(Agent):
 
     # -------------------- 消息构造 --------------------
     def _build_messages(self, input_text: str) -> List[Dict[str, Any]]:
-        """ 构建消息列表 """
+        """ 构建消息列表（历史取摘要遮蔽后的快照）"""
         messages: List[Dict[str, Any]] = []
         # 加入系统消息
         if self.system_prompt:
             messages.append({"role": "system", "content": self.system_prompt})
-        # 加入完整历史信息（tool_call_id / tool_calls 一并还原）
-        for msg in self.history_manager.get_history():
+        # 加入可见历史（已应用 summary 遮蔽；tool_call_id / tool_calls 一并还原）
+        for msg in self.history_manager.build_snapshot():
             messages.append(msg.to_llm_dict())
         # 加入用户输入
         messages.append({"role": "user", "content": input_text})
@@ -350,6 +354,26 @@ class CodeAgent(Agent):
         recorded = Message.from_llm_dict(message)
         self.add_message(recorded)
         return recorded
+
+    def _summarize_if_needed(self, step: int, run: int) -> None:
+        """每轮末尾做一次摘要判断（超阈值时向历史追加 summary 消息）
+
+        保留轮数 >= 当前轮数时，HistoryManager 按设计抛出 NotEnoughRoundsError；
+        这里捕获后只告警，避免摘要问题中断主循环。
+        """
+        try:
+            summary = self.history_manager.add_summary()
+        except NotEnoughRoundsError as e:
+            print(f"⚠️ 跳过历史摘要：{e}")
+            self._log("summary_skipped", {"reason": str(e)}, step=step, run=run)
+            return
+
+        if summary is not None:
+            self._log("summary", {
+                "summary_id": summary.id,
+                "replace": summary.replace,
+                "content_chars": len(summary.content),
+            }, step=step, run=run)
 
     # -------------------- 可观测性 --------------------
     def _log(self, event: str,  payload: Dict[str, Any], step: Optional[int] = None, run: Optional[int] = None) -> None:
