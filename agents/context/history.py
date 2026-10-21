@@ -3,7 +3,7 @@
 职责：
 - 消息追加（只追加，不编辑，缓存友好）
 - 按追加顺序为每条消息分配唯一 id
-- 构建发送给 LLM 的上下文（build_context，暂为空实现）
+- 构建发送给 LLM 的上下文（system_prompt + 快照）
 - 会话序列化/反序列化
 - 轮次边界检测
 - token 计量（真实输入 token + 增量估算，判断是否需要压缩）
@@ -49,7 +49,7 @@ class HistoryManager:
 
     # 取应用摘要遮蔽后的可见历史 / 发送给 LLM 的上下文
     snapshot = manager.build_snapshot()
-    context = manager.build_context()
+    context = manager.build_context("You are a helpful assistant.")
 
     # 序列化
     data = manager.to_dict()
@@ -196,16 +196,24 @@ class HistoryManager:
 
         return snapshot
 
-    def build_context(self) -> List[Dict[str, Any]]:
-        """根据完整历史构建"该发给模型的内容"
+    def build_context(self, system_prompt: Optional[str] = None) -> List[Dict[str, Any]]:
+        """依据 HistoryManager 的内容构建输入给大模型的完整上下文
 
-        说明：本步骤只做来源记录，上下文构建留待后续步骤实现，
-        当前为空实现，调用方不得依赖其返回值。
+        结构：system_prompt（可选）+ 应用摘要遮蔽后的历史快照。
+        summary 消息经 Message.to_llm_dict() 发送时会降级为 user 角色。
+
+        Args:
+            system_prompt: 系统提示词；为空则不加 system 消息
 
         Returns:
-            发送给 LLM 的消息字典列表（当前固定为空列表）
+            发送给 LLM 的消息字典列表
         """
-        return []
+        context: List[Dict[str, Any]] = []
+        if system_prompt:
+            context.append({"role": "system", "content": system_prompt})
+        for message in self.build_snapshot():
+            context.append(message.to_llm_dict())
+        return context
 
     # -------------------- token 计量 --------------------
 

@@ -57,7 +57,6 @@ class CodeAgent(Agent):
         self.max_steps = max_steps
         self.max_run_tokens = max_run_tokens
         self._run_index = 0
-        self._last_transcript: List[Dict[str, Any]] = []
 
     # ------------- 主循环 -------------
     def run(self, input_text: str, **kwargs) -> str:
@@ -85,8 +84,6 @@ class CodeAgent(Agent):
         run_index = self._run_index
         session_started = datetime.now()
 
-        messages = self._build_messages(input_text)
-        self._last_transcript = list(messages)
         schemas = self._build_tool_schemas()
 
         # 同步来源记录：用户输入是本次运行的第一条消息（id 最前）
@@ -106,10 +103,11 @@ class CodeAgent(Agent):
             final_calls: List[ToolCall] = []
             usage = {}
 
-            # 1) 调用 LLM（Function Calling）
+            # 1) 调用 LLM（Function Calling）：上下文每次从 HistoryManager 构建
             try:
                 for chunk in self.llm.stream_invoke_with_tools(
-                    messages=messages, tools=schemas, tool_choice="auto", **kwargs
+                    messages=self.history_manager.build_context(self.system_prompt),
+                    tools=schemas, tool_choice="auto", **kwargs
                 ):
                     if chunk.type == LLMStreamChunkType.THINKING:
                         reasoning_parts.append(chunk.text)
@@ -149,9 +147,8 @@ class CodeAgent(Agent):
                 status = "success"
                 break
 
-            # 3) 把助手消息追加进上下文（同时同步进历史）
+            # 3) 把助手消息同步进历史（下一次请求由 build_context 带出）
             assistant_msg = self._assistant_msg(_StreamResponse(content, final_calls))
-            messages.append(assistant_msg)
             self._record_llm_message(assistant_msg)
 
             # 4) 顺序执行工具并回填 tool 消息
@@ -173,7 +170,6 @@ class CodeAgent(Agent):
                         "tool_call_id": tool_call_id,
                         "result": result
                     }, step=step, run=run_index)
-                    messages.append({"role": "tool", "tool_call_id": tool_call_id, "content": result})
                     self._record_llm_message(
                         {"role": "tool", "tool_call_id": tool_call_id, "content": result}
                     )
@@ -200,7 +196,6 @@ class CodeAgent(Agent):
                     "tool_call_id": tool_call_id,
                     "result": result
                 }, step=step, run=run_index)
-                messages.append({"role": "tool", "tool_call_id": tool_call_id, "content": result})
                 self._record_llm_message(
                     {"role": "tool", "tool_call_id": tool_call_id, "content": result}
                 )
@@ -210,12 +205,12 @@ class CodeAgent(Agent):
 
             # 5) token 预算检查（步数上限由 while 条件处理）
             if self._budget_exhausted(step, tokens_used):
-                final_text = self._conclude(messages, schemas, step, run_index, **kwargs)
+                final_text = self._conclude(schemas, step, run_index, **kwargs)
                 status = "budget"
                 break
         else:
             # while 未 break，达到最大步数
-            final_text = self._conclude(messages, schemas, step, run_index, **kwargs)
+            final_text = self._conclude(schemas, step, run_index, **kwargs)
             status = "max_steps"
 
         # ------------ 运行结束 -------------
@@ -246,7 +241,7 @@ class CodeAgent(Agent):
         "不要输出任何工具调用语法（如 <tool_calls>），也不要试图继续调用工具。"
     )
 
-    def _conclude(self, messages, schemas, step, run_index, **kwargs) -> str:
+    def _conclude(self, schemas, step, run_index, **kwargs) -> str:
         """在预算耗尽或达到最大步数时，收敛为纯文本最终结论。
 
         三层防线：
@@ -257,7 +252,8 @@ class CodeAgent(Agent):
 
         绝不返回消息列表或原始调用段，最终兜底为确定性提示。
         """
-        final_messages = list(messages) + [
+        # 上下文仍由 HistoryManager 构建，收尾指令只是本次请求的临时尾巴（不入历史）
+        final_messages = self.history_manager.build_context(self.system_prompt) + [
             {"role": "user", "content": self._CONCLUDE_INSTRUCTION}
         ]
 
@@ -314,19 +310,6 @@ class CodeAgent(Agent):
 
 
     # -------------------- 消息构造 --------------------
-    def _build_messages(self, input_text: str) -> List[Dict[str, Any]]:
-        """ 构建消息列表（历史取摘要遮蔽后的快照）"""
-        messages: List[Dict[str, Any]] = []
-        # 加入系统消息
-        if self.system_prompt:
-            messages.append({"role": "system", "content": self.system_prompt})
-        # 加入可见历史（已应用 summary 遮蔽；tool_call_id / tool_calls 一并还原）
-        for msg in self.history_manager.build_snapshot():
-            messages.append(msg.to_llm_dict())
-        # 加入用户输入
-        messages.append({"role": "user", "content": input_text})
-        return messages
-
     @staticmethod
     def _assistant_msg(response) -> Dict[str, Any]:
         """ 构建助手消息 """
