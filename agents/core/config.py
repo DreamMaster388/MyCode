@@ -24,11 +24,13 @@ class Config(BaseModel):
     context_window: int = 128000  # 上下文窗口大小（tokens）
     compression_threshold: float = 0.8  # 压缩阈值（0.8 = 80%时触发压缩）
     min_retain_rounds: int = 10  # 压缩时保留的最小完整轮次数
-    enable_smart_compression: bool = False  # 是否启用智能摘要（需要额外LLM调用）
+    enable_smart_compression: bool = True  # 是否用大模型生成摘要（关闭则降级为简单摘要）
 
     # 智能摘要配置
     summary_llm_provider: str = "deepseek"  # 摘要专用 LLM 提供商
     summary_llm_model: str = "deepseek-chat"  # 摘要专用 LLM 模型
+    summary_llm_api_key: Optional[str] = None  # 摘要 LLM 的 api key；未设置时复用主 Agent 的
+    summary_llm_base_url: Optional[str] = None  # 摘要 LLM 的 base url；未设置时复用主 Agent 的
     summary_max_tokens: int = 800  # 摘要最大 Token 数
     summary_temperature: float = 0.3  # 摘要生成温度（更确定性）
 
