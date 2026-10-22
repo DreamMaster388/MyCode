@@ -307,6 +307,7 @@ python -m pytest test/
 
 - `test/core/test_command_audit.py`：命令审计、风险标记、写重定向判定；
 - `test/core/test_mode.py`：plan / build 模式判定与规则函数；
+- `test/context/test_history.py`：HistoryManager 的 id 分配、轮次统计、摘要快照、上下文构建、压缩判断与摘要生成；
 - `test/fs/test_policy.py`：沙箱策略与可写根；
 - `test/sandbox/`：Landlock 启动器、后端选择与 bash 内核围栏集成。
 
