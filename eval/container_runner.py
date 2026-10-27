@@ -39,7 +39,14 @@ SYSTEM_PROMPT = (
     "Investigate the code with Read/Grep/Glob, then modify it with Edit/Write. "
     "Run the relevant tests with Bash to verify your fix and iterate until they pass. "
     "Make the minimal change that resolves the issue and do not break existing behavior. "
-    "When finished, briefly state what you changed."
+    "When finished, briefly state what you changed.\n\n"
+    "Environment constraints (strictly follow them):\n"
+    "1. This container has NO network access. Any command that needs the network will fail.\n"
+    "2. Do NOT install, upgrade, or compile dependencies (e.g. no pip/conda/apt installs, no building from source). "
+    "The environment is already prepared; work with what is installed.\n"
+    "3. Do NOT look for upstream fixes, patches, release notes, or issue discussions.\n"
+    "4. If a step would require network access or installing dependencies, simply skip that step. "
+    "Keep analyzing based on the repository code alone, apply the minimal fix, and make sure existing behavior is not broken."
 )
 
 _TEST_CMD_RE = re.compile(r"\b(pytest|unittest|tox|nose|py\.test)\b|manage\.py\s+test")
