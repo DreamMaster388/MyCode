@@ -129,6 +129,7 @@ def run_instance(
     max_steps: int = 50,
     pull_timeout: int = 7200,
     keep_container: bool = False,
+    network: str = "none",
 ) -> Dict[str, Any]:
     """在实例容器内运行 Agent，返回补丁与诊断。"""
     inst_id = instance["instance_id"]
@@ -137,6 +138,7 @@ def run_instance(
         image=image,
         instance_id=inst_id,
         activation=eval_activation_prefix(instance),
+        network=network,
     )
 
     base: Dict[str, Any] = {

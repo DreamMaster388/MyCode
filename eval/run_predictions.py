@@ -58,6 +58,11 @@ def main() -> None:
     parser.add_argument("--workers", type=int, default=2)
     parser.add_argument("--pull-timeout", type=int, default=7200)
     parser.add_argument("--keep-container", action="store_true")
+    parser.add_argument(
+        "--network",
+        default="none",
+        help="容器网络模式（默认 none：完全断网；排查问题时可临时改为 host）",
+    )
     parser.add_argument("--model-name", default=DEFAULT_MODEL_NAME)
     parser.add_argument("--prepull", action="store_true", help="运行前顺序预拉全部镜像（避免并发限流）")
     args = parser.parse_args()
@@ -74,7 +79,7 @@ def main() -> None:
     out_dir.mkdir(parents=True, exist_ok=True)
 
     print(f"数据集: {args.dataset} ({args.split})")
-    print(f"实例数: {len(instances)}  workers={args.workers}  max_steps={args.max_steps}")
+    print(f"实例数: {len(instances)}  workers={args.workers}  max_steps={args.max_steps}  network={args.network}")
     print(f"输出目录: {out_dir}\n")
 
     results: list[dict] = []
@@ -85,7 +90,12 @@ def main() -> None:
         with ThreadPoolExecutor(max_workers=args.workers) as pool:
             futs = {
                 pool.submit(
-                    run_instance, inst, args.max_steps, args.pull_timeout, args.keep_container
+                    run_instance,
+                    inst,
+                    args.max_steps,
+                    args.pull_timeout,
+                    args.keep_container,
+                    network=args.network,
                 ): inst["instance_id"]
                 for inst in instances
             }
@@ -100,7 +110,13 @@ def main() -> None:
                           f"time={rec.get('duration_seconds')}s {rec.get('error', '')[:80]}")
     else:
         for inst in instances:
-            rec = run_instance(inst, args.max_steps, args.pull_timeout, args.keep_container)
+            rec = run_instance(
+                inst,
+                args.max_steps,
+                args.pull_timeout,
+                args.keep_container,
+                network=args.network,
+            )
             results.append(rec)
             done += 1
             flag = "OK" if rec.get("status") == "ok" and rec.get("patch_bytes") else "EMPTY/ERR"

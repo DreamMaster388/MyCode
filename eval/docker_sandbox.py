@@ -19,6 +19,25 @@ from typing import Optional, Sequence
 
 CONTAINER_WORKDIR = "/testbed"
 DEFAULT_PY = "/opt/miniconda3/bin/python"
+DEFAULT_NETWORK = "none"
+
+# 容器启动时注入的环境变量：
+# - 代理指向 127.0.0.1:9（discard 端口），让联网命令立即失败而非长时间等待；
+# - pip/HF/transformers 强制离线，禁止下载依赖或模型；
+# - 关闭字节码与 pytest 缓存，避免污染补丁。
+CONTAINER_ENV = {
+    "PIP_NO_INDEX": "1",
+    "PIP_DISABLE_PIP_VERSION_CHECK": "1",
+    "HF_HUB_OFFLINE": "1",
+    "TRANSFORMERS_OFFLINE": "1",
+    "PYTHONDONTWRITEBYTECODE": "1",
+    "PYTEST_ADDOPTS": "-p no:cacheprovider",
+    "TMPDIR": "/tmp",
+    "http_proxy": "http://127.0.0.1:9",
+    "https_proxy": "http://127.0.0.1:9",
+    "HTTP_PROXY": "http://127.0.0.1:9",
+    "HTTPS_PROXY": "http://127.0.0.1:9",
+}
 
 # ---------------------------------------------------------------------------
 # 容器内运行的 Python 小脚本（作为 argv 传入 python -c，无 shell 引号问题）
@@ -100,9 +119,10 @@ class DockerSandbox:
         instance_id: str,
         activation: str = "cd /testbed",
         python_bin: str = DEFAULT_PY,
-        network: str = "host",
+        network: str = DEFAULT_NETWORK,
         name: Optional[str] = None,
         workdir: str = CONTAINER_WORKDIR,
+        env: Optional[dict] = None,
     ) -> None:
         self.image = image
         self.instance_id = instance_id
@@ -110,6 +130,7 @@ class DockerSandbox:
         self.python_bin = python_bin
         self.network = network
         self.workdir = workdir
+        self.env = {**CONTAINER_ENV, **(env or {})}
         safe = instance_id.replace("/", "_")
         self.name = name or f"agent-eval-{safe}-{uuid.uuid4().hex[:8]}"
         self._started = False
@@ -156,16 +177,17 @@ class DockerSandbox:
     def start(self) -> ExecResult:
         # 清理可能残留的同名容器
         self._run(["rm", "-f", self.name], timeout=120)
-        res = self._run(
-            [
-                "run", "-d", "--name", self.name,
-                "--network", self.network,
-                "-w", self.workdir,
-                self.image,
-                "sleep", "infinity",
-            ],
-            timeout=300,
-        )
+        args = [
+            "run", "-d", "--name", self.name,
+            "--network", self.network,
+            # 禁止进程通过 setuid 等方式提权
+            "--security-opt", "no-new-privileges:true",
+            "-w", self.workdir,
+        ]
+        for key, value in self.env.items():
+            args += ["-e", f"{key}={value}"]
+        args += [self.image, "sleep", "infinity"]
+        res = self._run(args, timeout=300)
         if res.ok:
             self._started = True
         return res
