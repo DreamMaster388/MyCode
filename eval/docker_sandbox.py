@@ -39,6 +39,10 @@ CONTAINER_ENV = {
     "HTTPS_PROXY": "http://127.0.0.1:9",
 }
 
+# 补丁过滤阈值：单个文件 / 整份补丁超过 1MB 都裁掉，避免超大 patch 拖垮判分。
+PATCH_MAX_BYTES = 1_000_000
+PATCH_MAX_FILE_BYTES = 1_000_000
+
 # ---------------------------------------------------------------------------
 # 容器内运行的 Python 小脚本（作为 argv 传入 python -c，无 shell 引号问题）
 # ---------------------------------------------------------------------------
@@ -98,6 +102,193 @@ for m in matches[:2000]:
 print(f"[{len(matches)} matches]")
 """
 
+# 补丁提取：清缓存 → git add -A → 过滤 → 输出 diff。
+# 过滤规则（对齐 300 例全量跑出的脏补丁）：
+# - 二进制文件（git 判定 binary 的、图片/字体/压缩包等）；
+# - 构建产物（__pycache__、*.pyc、build/、dist/、*.egg-info、node_modules、缓存目录）；
+# - 临时文件（downloads/、tmp*、downloads 解压目录、repro/scratch 脚本等）；
+# - 文档（docs/、*.rst/.md/.txt、CHANGES/README 等）；
+# - 测试文件（instance.test_patch / test_files 中的路径 + tests/testing 目录 + test_*.py）；
+# - 单文件或整份补丁超过 max_bytes 的超大 patch。
+_PATCH_SCRIPT = r"""
+import json, os, re, shutil, subprocess, sys
+
+workdir, cfg_json = sys.argv[1], sys.argv[2]
+cfg = json.loads(cfg_json)
+exclude = [p.strip("/") for p in (cfg.get("exclude_paths") or []) if p and p.strip("/")]
+max_total = int(cfg.get("max_bytes") or 1000000)
+max_file = int(cfg.get("max_file_bytes") or 1000000)
+os.chdir(workdir)
+
+JUNK_DIRS = {
+    "downloads", "build", "dist", ".eggs", ".tox", ".nox", "node_modules",
+    "__pycache__", ".pytest_cache", ".mypy_cache", ".ruff_cache", ".cache",
+    ".venv", "venv", "site-packages", "tmp", "tmp_pkg", "tmp_repro", "tmpdl",
+    "_scratch", "scratch", "tmp_repo", "tmp_unroll",
+}
+JUNK_SUFFIXES = (
+    ".pyc", ".pyo", ".so", ".o", ".a", ".class", ".jar", ".whl", ".tar.gz",
+    ".tgz", ".zip", ".sqlite3", ".db", ".log", ".pid", ".swp", ".orig",
+    ".rej", ".bak", ".tmp", ".png", ".jpg", ".jpeg", ".gif", ".svg", ".ico",
+    ".pdf", ".woff", ".woff2", ".ttf", ".eot",
+)
+JUNK_NAMES = {".DS_Store", "coverage.xml", ".coverage"}
+# 只匹配"完整临时脚本名"（repro.py / repro_2.py / tmp_repro.py ...），
+# 避免误伤 tmpdir.py、templates.py、debug.py 这类正常源码文件。
+JUNK_NAME_RE = re.compile(
+    r"^(?:(?:repro|scratch|tmp|temp)(?:[0-9]+|[_-][\w.-]+)?"
+    r"|fetch_tmp|gettests|extract_tests|geturl|ping)"
+    r"\.(?:py|txt|sh|log|out)$"
+)
+DOC_SUFFIXES = (".rst", ".md", ".txt", ".1", ".man", ".tex", ".html", ".po")
+DOC_NAMES = {
+    "CHANGES", "CHANGES.rst", "CHANGES.md", "README", "README.rst", "README.md",
+    "AUTHORS", "AUTHORS.rst", "LICENSE", "LICENSE.txt", "NEWS", "NEWS.rst",
+}
+CLEAN_DIRS = {"__pycache__", ".pytest_cache", ".mypy_cache", ".ruff_cache"}
+
+
+def git(*args, input=None):
+    return subprocess.run(["git", *args], input=input, capture_output=True)
+
+
+def is_excluded(path):
+    for e in exclude:
+        if path == e or path.startswith(e + "/"):
+            return True
+    return False
+
+
+def is_test(path):
+    parts = path.split("/")
+    name = parts[-1]
+    if any(p in ("tests", "testing") for p in parts[:-1]):
+        return True
+    return name.startswith("test_") or name.endswith("_test.py") or name == "conftest.py"
+
+
+def is_junk(path):
+    parts = path.split("/")
+    if any(p in JUNK_DIRS or p.endswith(".egg-info") or p.startswith("tmp_") for p in parts[:-1]):
+        return True
+    if parts[0].startswith(("tmp_", "_scratch")):
+        return True
+    name = parts[-1]
+    if name in JUNK_NAMES or name.endswith(JUNK_SUFFIXES):
+        return True
+    return bool(JUNK_NAME_RE.match(name))
+
+
+def is_doc(path):
+    parts = path.split("/")
+    name = parts[-1]
+    if any(p in ("doc", "docs", "changelog", "changes") for p in parts[:-1]):
+        return True
+    if name in DOC_NAMES or name.endswith(DOC_SUFFIXES):
+        return True
+    return bool(re.match(r"^(?:changelog|news|release[-_]?notes)", name, re.I))
+
+
+def clean_artifacts():
+    for root, dirs, files in os.walk("."):
+        dirs[:] = [d for d in dirs if d != ".git"]
+        for d in list(dirs):
+            if d in CLEAN_DIRS:
+                shutil.rmtree(os.path.join(root, d), ignore_errors=True)
+                dirs.remove(d)
+        for f in files:
+            if f.endswith((".pyc", ".pyo")):
+                try:
+                    os.remove(os.path.join(root, f))
+                except OSError:
+                    pass
+
+
+def split_segments(diff):
+    starts = [m.start() for m in re.finditer(r"^diff --git ", diff, re.M)]
+    if not starts:
+        return []
+    starts.append(len(diff))
+    return [diff[starts[i]:starts[i + 1]] for i in range(len(starts) - 1)]
+
+
+def seg_path(seg):
+    m = re.match(r"diff --git a/(\S+) b/(\S+)", seg)
+    return m.group(2) if m else ""
+
+
+clean_artifacts()
+git("add", "-A")
+
+names = [
+    p for p in git("diff", "--cached", "HEAD", "--name-only", "-z")
+    .stdout.decode("utf-8", "replace").split("\0") if p
+]
+kept = [p for p in names if not is_excluded(p) and not is_test(p) and not is_junk(p) and not is_doc(p)]
+
+# 用索引里的 blob 大小剔除超大文件；删除的文件查不到，按 0 处理。
+size_paths = [p for p in kept if "\n" not in p]
+sizes = {}
+if size_paths:
+    payload = "".join(":%s\n" % p for p in size_paths).encode("utf-8", "replace")
+    lines = git("cat-file", "--batch-check", input=payload).stdout.decode("utf-8", "replace").splitlines()
+    for p, line in zip(size_paths, lines):
+        fields = line.split()
+        if len(fields) == 3 and fields[1] == "blob":
+            try:
+                sizes[p] = int(fields[2])
+            except ValueError:
+                pass
+
+dropped = []
+for p in list(kept):
+    if sizes.get(p, 0) > max_file:
+        dropped.append("%s (file %dB)" % (p, sizes[p]))
+kept = [p for p in kept if sizes.get(p, 0) <= max_file]
+
+diff_args = ["-c", "core.fileMode=false", "diff", "--cached", "HEAD"]
+if kept and len(kept) <= 500 and sum(len(p) for p in kept) <= 60000:
+    diff_args += ["--", *kept]
+raw = git(*diff_args).stdout.decode("utf-8", "replace")
+
+final = []
+for seg in split_segments(raw):
+    p = seg_path(seg)
+    if not p or is_excluded(p) or is_test(p) or is_junk(p) or is_doc(p):
+        continue
+    if "GIT binary patch" in seg or re.search(r"^Binary files .* differ$", seg, re.M):
+        dropped.append(p + " (binary)")
+        continue
+    if "\ufffd" in seg:
+        # 原文含非 UTF-8 字节：解码已被替换，补丁无法可靠 apply，整段丢弃。
+        dropped.append(p + " (non-utf8)")
+        continue
+    seg_size = len(seg.encode("utf-8", "replace"))
+    if seg_size > max_file:
+        dropped.append("%s (file %dB)" % (p, seg_size))
+        continue
+    final.append((seg_size, seg))
+
+total = sum(s for s, _ in final)
+if total > max_total:
+    order = sorted(range(len(final)), key=lambda i: final[i][0], reverse=True)
+    keep_idx = set(range(len(final)))
+    for i in order:
+        if total <= max_total:
+            break
+        keep_idx.discard(i)
+        total -= final[i][0]
+        dropped.append(seg_path(final[i][1]) + " (over total budget)")
+    final = [final[i] for i in sorted(keep_idx)]
+
+sys.stdout.buffer.write("".join(seg for _, seg in final).encode("utf-8", "replace"))
+sys.stderr.write(
+    "patch-filter: kept=%d dropped=%d skipped=%d tests=%d excluded=%d\n"
+    % (len(final), len(dropped), len(names) - len(kept), sum(1 for p in names if is_test(p)),
+       sum(1 for p in names if is_excluded(p)))
+)
+"""
+
 
 @dataclass
 class ExecResult:
@@ -142,6 +333,9 @@ class DockerSandbox:
                 ["docker", *args],
                 input=input,
                 text=True,
+                # 仓库里可能存在非 UTF-8 文件（diff 输出会带上原始字节），
+                # 解码失败时替换而不是抛 UnicodeDecodeError。
+                errors="replace",
                 capture_output=True,
                 timeout=timeout,
             )
@@ -246,17 +440,29 @@ class DockerSandbox:
         return self.bash(cmd, timeout=timeout)
 
     # ---------------- 补丁提取 ----------------
-    def model_patch(self, timeout: int = 180) -> ExecResult:
-        """清洗构建产物后，提取相对 HEAD（base_commit）的完整改动。"""
-        clean = (
-            "find . -type d -name __pycache__ -prune -exec rm -rf {} + 2>/dev/null; "
-            "find . -type d \\( -name .pytest_cache -o -name .mypy_cache -o -name .ruff_cache \\) "
-            "-prune -exec rm -rf {} + 2>/dev/null; "
-            "find . -name '*.pyc' -delete 2>/dev/null; "
-            "git add -A && "
-            "git -c core.fileMode=false diff --cached HEAD"
+    def model_patch(
+        self,
+        exclude_paths: Optional[Sequence[str]] = None,
+        max_bytes: int = PATCH_MAX_BYTES,
+        max_file_bytes: int = PATCH_MAX_FILE_BYTES,
+        timeout: int = 300,
+    ) -> ExecResult:
+        """清洗产物并提取相对 HEAD（base_commit）的改动，过滤脏文件。
+
+        exclude_paths: 需要排除的路径（通常是 instance 的测试文件）。
+        max_bytes/max_file_bytes: 整份/单文件补丁大小上限，超出则裁掉。
+        """
+        import json
+
+        cfg = {
+            "exclude_paths": list(exclude_paths or []),
+            "max_bytes": max_bytes,
+            "max_file_bytes": max_file_bytes,
+        }
+        return self.exec(
+            [self.python_bin, "-c", _PATCH_SCRIPT, self.workdir, json.dumps(cfg)],
+            timeout=timeout,
         )
-        return self.bash(clean, timeout=timeout)
 
     def git_head(self) -> str:
         res = self.exec(["git", "rev-parse", "HEAD"], timeout=60)
