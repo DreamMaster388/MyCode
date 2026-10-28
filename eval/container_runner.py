@@ -39,7 +39,22 @@ SYSTEM_PROMPT = (
     "Investigate the code with Read/Grep/Glob, then modify it with Edit/Write. "
     "Run the relevant tests with Bash to verify your fix and iterate until they pass. "
     "Make the minimal change that resolves the issue and do not break existing behavior. "
-    "When finished, briefly state what you changed."
+    "When finished, briefly state what you changed.\n\n"
+    "Environment constraints (strictly follow them):\n"
+    "1. This container has NO network access. Any command that needs the network will fail.\n"
+    "2. Do NOT install, upgrade, or compile dependencies (e.g. no pip/conda/apt installs, no building from source). "
+    "The environment is already prepared; work with what is installed.\n"
+    "3. Do NOT look for upstream fixes, patches, release notes, or issue discussions.\n"
+    "4. If a step would require network access or installing dependencies, simply skip that step. "
+    "Keep analyzing based on the repository code alone, apply the minimal fix, and make sure existing behavior is not broken.\n\n"
+    "Patch hygiene (strictly follow them):\n"
+    "5. Do NOT modify unit tests or any test file (e.g. tests/, test_*.py, conftest.py). "
+    "The grading harness resets test files, so edits there are discarded. Read and run them, but never add, edit, or delete them.\n"
+    "6. Do NOT modify documentation, docstrings, comments, README, CHANGES or other docs. "
+    "Only change the code that is required for the fix.\n"
+    "7. Before finishing, delete every binary file, build artifact, cache, downloaded archive and temporary/scratch file you created "
+    "(e.g. __pycache__, *.pyc, build/, dist/, *.egg-info, downloads/, tmp/). "
+    "The final diff must contain code changes only."
 )
 
 _TEST_CMD_RE = re.compile(r"\b(pytest|unittest|tox|nose|py\.test)\b|manage\.py\s+test")
@@ -117,11 +132,41 @@ def build_agent(sandbox: DockerSandbox, max_steps: int = 50) -> InstrumentedCode
     )
 
 
+def test_exclude_paths(instance: Dict) -> List[str]:
+    """收集不应进入补丁的测试路径：test_patch / test_files / /dev/null 除外。"""
+    paths = set()
+
+    def _add(raw: str) -> None:
+        p = (raw or "").strip()
+        # diff 头里的 a/、b/ 前缀去掉；/dev/null 是新增/删除文件的占位。
+        if p.startswith(("a/", "b/")):
+            p = p[2:]
+        if p and p != "/dev/null":
+            paths.add(p)
+
+    for line in (instance.get("test_patch") or "").splitlines():
+        if line.startswith("diff --git "):
+            parts = line.split()
+            for token in parts[2:4]:
+                _add(token)
+        elif line.startswith(("+++ ", "--- ")):
+            _add(line[4:])
+
+    test_files = instance.get("test_files") or []
+    if isinstance(test_files, str):
+        test_files = [test_files]
+    for item in test_files:
+        _add(str(item))
+
+    return sorted(paths)
+
+
 def run_instance(
     instance: Dict,
     max_steps: int = 50,
     pull_timeout: int = 7200,
     keep_container: bool = False,
+    network: str = "none",
 ) -> Dict[str, Any]:
     """在实例容器内运行 Agent，返回补丁与诊断。"""
     inst_id = instance["instance_id"]
@@ -130,6 +175,7 @@ def run_instance(
         image=image,
         instance_id=inst_id,
         activation=eval_activation_prefix(instance),
+        network=network,
     )
 
     base: Dict[str, Any] = {
@@ -163,7 +209,7 @@ def run_instance(
         try:
             agent = build_agent(sandbox, max_steps=max_steps)
             final_text = agent.run(instance["problem_statement"])
-            patch_res = sandbox.model_patch()
+            patch_res = sandbox.model_patch(exclude_paths=test_exclude_paths(instance))
             patch = patch_res.out if patch_res.ok else ""
             if not patch_res.ok:
                 base["error"] = f"patch extraction failed: {(patch_res.err or patch_res.out).strip()[:500]}"
