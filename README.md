@@ -2,7 +2,7 @@
 
 基于开源框架 **HelloAgents** 二次开发的本地命令行编码助手（Coding Agent）。
 在框架的智能体、上下文工程与工具系统之上，本项目自行实现了编码智能体主循环、
-双模式安全沙箱、bash 命令审计、流式交互、CLI 命令体系与 SWE-bench 风格评测框架。
+双模式安全沙箱、流式交互、CLI 命令体系与 SWE-bench 风格评测框架。
 
 - 框架来源：HelloAgents（https://github.com/jjyaoao/HelloAgents）
 - 作者 / 维护者：jjyaoao（https://github.com/jjyaoao）
@@ -30,13 +30,10 @@
 
 - **编码智能体主循环**：`CodeAgent` 基于 Function Calling，支持流式思考/正文输出、
   工具调用与结果摘要、步数与 token 预算控制，并在预算耗尽时收敛为纯文本结论。
-- **双运行模式（硬约束）**：
-  - `plan`：只读探索代码，白名单外的一律拦截；
-  - `build`：允许写文件与执行构建命令，但仍受高危拦截与路径沙箱约束。
-- **bash 命令审计**：基于 `bashlex` 解析命令 AST，将管道、重定向、子命令、
-  控制流、命令替换等归一化为审计模型，解析失败即默认拒绝。
+- **双运行模式**：`plan` / `build` 决定 bash 的沙箱策略——`plan` 只读
+  （写入被内核拒绝），`build` 可写项目目录与额外可写根。
 - **写路径沙箱**：以 `realpath` 计算文件身份，写操作必须落在可写根之内；
-  文件工具与 bash 写重定向共用同一套策略。
+  文件工具与 bash 执行共用同一套 `SandboxPolicy` 语义。
 - **专用工具优先**：提供 `Read / Write / Edit / Bash / Grep / Glob`，
   系统提示词要求优先使用专用工具、仅在必要时使用 Bash。
 - **CLI 命令体系**：以 `/` 前缀识别命令（如 `/mode plan`、`/mode build`），
@@ -74,7 +71,7 @@ python -m agents
 ### 交互示例
 
 ```
-(build) 你> 帮我看看 agents/core/mode.py 里 plan 模式都拦截了哪些命令
+(build) 你> 帮我看看 agents/core/mode.py 里 plan 模式的沙箱策略
 ...
 (build) 你> /mode plan
 (plan)  你> 阅读 agents/fs/policy.py 并总结写授权逻辑
@@ -99,40 +96,20 @@ python -m agents
 
 ## 安全模型
 
-核心原则：**默认拒绝**。
+核心原则：**默认拒绝**——沙箱后端不可用时拒绝执行，而不是猜测安全后放行。
 
-### 1. 执行入口守卫 `ModeGuard`
+### 1. 模式与沙箱策略 `ModeGuard`
 
-所有工具调用在执行前必须经过 `agents/core/mode.py` 的 `ModeGuard.check_tool()`：
-返回 `None` 放行，返回字符串表示拦截原因（作为错误反馈给模型）。
+`agents/core/mode.py` 的 `ModeGuard` 持有当前模式，并通过 `sandbox_policy()`
+把模式折算成 `SandboxPolicy` 交给 bash 内核围栏：
 
-- **plan 模式**
-  - 非 bash 工具：仅放行只读白名单（`Read / LS / Glob / Grep / Skill`，
-    含对应 `*Tool` 变体）内的工具。
-  - bash：整棵命令树必须“全只读”才放行；控制流（`if/for/while`）直接拒绝；
-    写重定向与提权/下载/安装等风险标记均拒绝；对 `$()` 与子 shell 递归审查，
-    防止 `ls $(rm -rf /)` 这类“外层只读、内层破坏”的绕过。
-  - 解释器（`python/node/bash/...`）即使命令名看似无害也一律拒绝。
-- **build 模式**
-  - 工具：写工具对每个路径参数做写路径沙箱校验。
-  - bash：拦截高危命令（提权 `privilege`、破坏性 `footgun`、任意下载 `download`），
-    允许依赖安装（`pkg_install`），并对写重定向目标做路径沙箱校验；
-    此外 bash 统一在**内核写围栏**内执行（见第 4 节）。
+- `plan` -> `read-only`：bash 没有可写根，写入被内核拒绝；
+- `build` -> 沿配置的策略（通常 `workspace-write`），可写工作区与额外可写根。
 
-### 2. 命令审计 `CommandAudit`
+入口守卫 `check_tool()` 目前恒返回 `None`，不再在工具执行前做命令/路径审查；
+工具鉴权体系仍在重构中。
 
-`agents/core/command_audit.py` 使用 `bashlex` 把命令解析为归一化模型：
-
-- `Segment`：单条命令（命令名、参数、重定向、风险标记）；
-- `Redirection`：重定向操作符与目标，区分读/写；
-- `nested_commands`：`$()` / 子 shell 中的子命令，递归审计；
-- `has_control_flow` / `has_pipeline` / `has_subshell` 等整体标志；
-- 风险标记：`privilege`（sudo/su/doas）、`download`（curl/wget）、
-  `footgun`（rm/dd/mkfs/shred、git 破坏性子命令）、`pkg_install`（pip/npm/make/...）。
-
-任何解析失败都返回非空 `parse_error`，由规则层默认拒绝。
-
-### 3. 文件系统沙箱与策略
+### 2. 文件系统沙箱与策略
 
 - `agents/fs/target.py`：路径解析 seam。`resolve_path()` 把路径解析为稳定身份
   `FsTarget`（`target_key` 用 `os.path.realpath`），`is_within()` 按身份判断父子关系。
@@ -140,14 +117,14 @@ python -m agents
   - `SandboxMode`：`read-only` / `workspace-write` / `danger-full-access`；
   - `SandboxPolicy`：工作区根 + 额外可写根；
   - `authorize_write()`：放行返回 `None`，拒绝抛 `SandboxDenied`。
-- 文件工具与 bash 写重定向共用同一 policy。
+- 文件工具与 bash 执行都消费 `SandboxPolicy`，写授权统一由 `authorize_write()` 判定。
 
 工具通过基类能力元数据 `is_write_tool` 与 `path_params`
 （`agents/tools/base.py`）声明自身是否为写工具、哪些参数是路径。
 
-### 4. 内核写围栏 `agents/sandbox/`
+### 3. 内核写围栏 `agents/sandbox/`
 
-`ModeGuard` 是执行前的策略闸门；`agents/sandbox/` 则是**内核级硬边界**：
+`agents/sandbox/` 是 bash 的**内核级硬边界**：
 bash 命令被包装后执行，写入位置由内核保证，与命令字符串如何书写无关。
 
 - 后端：`LandlockBackend`（ctypes 启动器 `landlock_exec.py`，Linux 基线）与
@@ -194,8 +171,7 @@ Python 文件工具仍走应用层围栏；**读、网络、资源耗尽**不在
 | 模块 | 说明 |
 | --- | --- |
 | `agents/agent/code_agent.py` | 编码智能体主循环，流式 `stream_run`，工具执行/输出截断/步数与 token 预算/收尾兜底 |
-| `agents/core/mode.py` | `AgentMode`（build/plan）与执行入口守卫 `ModeGuard` 及规则函数 |
-| `agents/core/command_audit.py` | 基于 `bashlex` 的 bash 命令审计核心 |
+| `agents/core/mode.py` | `AgentMode`（build/plan）与 `ModeGuard`（模式到 `SandboxPolicy` 的映射） |
 | `agents/fs/target.py` | 路径解析与身份判定 seam（`FsTarget`/`resolve_path`/`is_within`） |
 | `agents/fs/policy.py` | 沙箱模式、策略与写授权判定（`SandboxPolicy`/`authorize_write`） |
 | `agents/fs/__init__.py` | 文件系统子包导出 |
@@ -207,7 +183,7 @@ Python 文件工具仍走应用层围栏；**读、网络、资源耗尽**不在
 | `agents/tools/builtin/grep_tool.py` | Grep 内容搜索工具 |
 | `agents/tools/builtin/glob_tool.py` | Glob 文件查找工具 |
 | `eval/` | SWE-bench 风格评测框架 |
-| `test/` | 单元测试（命令审计、沙箱策略等） |
+| `test/` | 单元测试（模式、沙箱策略、内核围栏等） |
 
 ### 三、在框架文件上的自研改动
 
@@ -221,7 +197,6 @@ Python 文件工具仍走应用层围栏；**读、网络、资源耗尽**不在
 | `agents/tools/builtin/file_tools.py` | `Read/Write/Edit` 接入路径 policy 与沙箱鉴权 |
 | `agents/tools/builtin/__init__.py` | 导出新增工具 |
 | `main.py` | 改为消费 `stream_run` 的流式交互入口，注册命令与守卫 |
-| `requirements.txt` | 新增 `bashlex` 依赖 |
 
 ---
 
@@ -236,7 +211,7 @@ MyCode/
 │   ├── agent/                  # 智能体：simple/react/reflection/plan_solve（框架）、code_agent（自研）
 │   ├── cli/                    # 自研：CLI 命令体系
 │   ├── context/                # 上下文构建/历史（含 token 计量）/截断（框架）
-│   ├── core/                   # LLM、Agent 基类、流式、配置（框架）+ mode/command_audit（自研）
+│   ├── core/                   # LLM、Agent 基类、流式、配置（框架）+ mode（自研）
 │   ├── fs/                     # 自研：路径解析与沙箱策略
 │   ├── sandbox/                # 自研：内核写围栏后端（Landlock/bwrap）
 │   ├── observability/          # trace 日志（框架）
@@ -250,7 +225,6 @@ MyCode/
 │   ├── judge.py                # 测试结果解析与判定
 │   └── run_eval.py             # 批量运行 CLI
 ├── test/                       # 自研：pytest 单测
-│   ├── core/test_command_audit.py
 │   ├── core/test_mode.py
 │   ├── fs/test_policy.py
 │   └── sandbox/                # 内核写围栏测试
@@ -305,8 +279,7 @@ python -m pytest test/
 
 当前包含：
 
-- `test/core/test_command_audit.py`：命令审计、风险标记、写重定向判定；
-- `test/core/test_mode.py`：plan / build 模式判定与规则函数；
+- `test/core/test_mode.py`：AgentMode 取值、默认策略构造与模式切换；
 - `test/context/test_history.py`：HistoryManager 的 id 分配、轮次统计、摘要快照、上下文构建、压缩判断与摘要生成；
 - `test/fs/test_policy.py`：沙箱策略与可写根；
 - `test/sandbox/`：Landlock 启动器、后端选择与 bash 内核围栏集成。

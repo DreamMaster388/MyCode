@@ -1,7 +1,7 @@
 """沙箱策略: 模式 + 可写根, 以及统一的写授权判定。
 
-文件工具与 bash 写重定向都消费这里的 writable_roots / authorize_write,
-保证"文件工具不能写而 bash 能写"这类不对称不会出现。
+文件工具直接调用这里的 authorize_write; bash 内核围栏按同一
+workspace_root / extra_writable 构造写规则, 保证两侧的可写边界一致。
 """
 from __future__ import annotations
 
