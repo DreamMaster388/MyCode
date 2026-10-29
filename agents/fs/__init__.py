@@ -7,6 +7,7 @@ from .policy import (
     SandboxMode,
     SandboxPolicy,
     authorize_write,
+    readable_roots,
     writable_roots,
 )
 from .target import FsTarget, PathError, is_within, resolve_path
@@ -23,5 +24,5 @@ def build_policy(mode: Union[SandboxMode, str], workspace_root: str) -> SandboxP
 __all__ = [
     "FsTarget", "PathError", "resolve_path", "is_within",
     "SandboxMode", "SandboxPolicy", "SandboxDenied",
-    "authorize_write", "writable_roots", "build_policy",
+    "authorize_write", "writable_roots", "readable_roots", "build_policy",
 ]

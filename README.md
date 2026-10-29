@@ -106,6 +106,10 @@ python -m agents
 - `plan` -> `read-only`：bash 没有可写根，写入被内核拒绝；
 - `build` -> 沿配置的策略（通常 `workspace-write`），可写工作区与额外可写根。
 
+`ModeGuard` 还维护用户永久批准的可读/可写目录（`add_read_root()` /
+`add_write_root()` 与其 `remove_*` 对应方法）；`sandbox_policy()` 会把批准目录
+并入策略的额外可读/可写根，批准状态跨模式保留。
+
 入口守卫 `check_tool()` 目前恒返回 `None`，不再在工具执行前做命令/路径审查；
 工具鉴权体系仍在重构中。
 
@@ -115,7 +119,8 @@ python -m agents
   `FsTarget`（`target_key` 用 `os.path.realpath`），`is_within()` 按身份判断父子关系。
 - `agents/fs/policy.py`：
   - `SandboxMode`：`read-only` / `workspace-write` / `danger-full-access`；
-  - `SandboxPolicy`：工作区根 + 额外可写根；
+  - `SandboxPolicy`：工作区根 + 额外可写根 + 额外可读根；
+  - `writable_roots()` / `readable_roots()`：可写根 / 可读根（项目目录 + 批准根）；
   - `authorize_write()`：放行返回 `None`，拒绝抛 `SandboxDenied`。
 - 文件工具与 bash 执行都消费 `SandboxPolicy`，写授权统一由 `authorize_write()` 判定。
 
@@ -135,6 +140,8 @@ bash 命令被包装后执行，写入位置由内核保证，与命令字符串
   放行）；`danger-full-access` 不包装。
 - 只处理**写**相关权限（write / remove / make / refer / truncate），读与执行不受
   影响，因此无需为整个文件系统构造读规则。
+- 读围栏尚未接入：`SYSTEM_READ_ROOTS` 与 `read_roots(policy)` 已给出
+  「系统最小集 + 项目/用户批准目录」的读根清单，供后续 Landlock 读规则使用。
 - Landlock 规则对子进程继续生效，天然覆盖 `env` / `xargs` / `sh -c` / `$(...)` /
   重定向等所有派生写法（例如 `env rm -rf /` 也会被内核拒绝）。
 - 拒绝识别：非零退出且 stderr 命中方言（`permission denied` 等）时，返回
@@ -282,7 +289,7 @@ python -m pytest test/
 - `test/core/test_mode.py`：AgentMode 取值、默认策略构造与模式切换；
 - `test/context/test_history.py`：HistoryManager 的 id 分配、轮次统计、摘要快照、上下文构建、压缩判断与摘要生成；
 - `test/fs/test_policy.py`：沙箱策略与可写根；
-- `test/sandbox/`：Landlock 启动器、后端选择与 bash 内核围栏集成。
+- `test/sandbox/`：Landlock 启动器、后端选择、沙箱读/写根与 bash 内核围栏集成。
 
 ---
 

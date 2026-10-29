@@ -1,7 +1,7 @@
-"""沙箱策略: 模式 + 可写根, 以及统一的写授权判定。
+"""沙箱策略: 模式 + 可读根 + 可写根, 以及统一的写授权判定。
 
-文件工具直接调用这里的 authorize_write; bash 内核围栏按同一
-workspace_root / extra_writable 构造写规则, 保证两侧的可写边界一致。
+文件工具直接调用这里的 authorize_write; bash 内核围栏按同一套可读/可写根
+(readable_roots / writable_roots) 构造规则, 保证两侧边界一致。
 """
 from __future__ import annotations
 
@@ -24,13 +24,15 @@ class SandboxMode(str, Enum):
 class SandboxPolicy:
     """一次调用生效的策略。
 
-    workspace_root : 工作区根(已解析为稳定身份)。
-    extra_writable : 额外可写根(默认空; 需要临时目录等时显式追加)。
+    workspace_root : 工作区根(已解析为稳定身份), 同时也是默认可读/可写根。
+    extra_writable : 额外可写根(用户批准目录、临时目录等; 默认空)。
+    extra_readable : 额外可读根(用户批准目录; 默认空)。
     """
 
     mode: SandboxMode
     workspace_root: FsTarget
     extra_writable: tuple[FsTarget, ...] = ()
+    extra_readable: tuple[FsTarget, ...] = ()
 
 
 class SandboxDenied(Exception):
@@ -58,6 +60,21 @@ def writable_roots(policy: SandboxPolicy) -> list[FsTarget]:
     seen: set[str] = set()
     roots: list[FsTarget] = []
     for root in (policy.workspace_root, *policy.extra_writable):
+        if root.target_key not in seen:
+            seen.add(root.target_key)
+            roots.append(root)
+    return roots
+
+
+def readable_roots(policy: SandboxPolicy) -> list[FsTarget]:
+    """当前策略下的可读根列表: 用户批准根 + 项目目录根。
+
+    与 writable_roots 不同, 可读根与 mode 无关(任何模式都要能读项目与批准目录);
+    系统命令所需的最小读根由沙箱层(SYSTEM_READ_ROOTS)补充。
+    """
+    seen: set[str] = set()
+    roots: list[FsTarget] = []
+    for root in (policy.workspace_root, *policy.extra_readable):
         if root.target_key not in seen:
             seen.add(root.target_key)
             roots.append(root)
