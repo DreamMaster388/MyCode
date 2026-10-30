@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import os
+import sys
 import tempfile
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Protocol, runtime_checkable
@@ -99,6 +100,22 @@ def write_roots(policy: "SandboxPolicy") -> list[str]:
 
 
 # 系统命令运行所需的最小可读根(暂定值, 后续由读围栏测试收敛)。
+# 除固定系统目录外, 还需包含当前解释器前缀(conda/venv): 否则围栏内
+# `python -c pass` 连标准库都读不到。
+def _interpreter_read_roots() -> tuple[str, ...]:
+    """当前解释器/工具链的读根(随运行环境变化)。"""
+    candidates = (
+        getattr(sys, "base_prefix", ""),
+        getattr(sys, "prefix", ""),
+        os.path.dirname(os.path.realpath(sys.executable)),
+    )
+    roots: list[str] = []
+    for raw in candidates:
+        if raw and raw not in roots:
+            roots.append(raw)
+    return tuple(roots)
+
+
 SYSTEM_READ_ROOTS: tuple[str, ...] = (
     "/bin",
     "/sbin",
@@ -109,7 +126,7 @@ SYSTEM_READ_ROOTS: tuple[str, ...] = (
     "/proc",
     "/dev",
     "/sys",
-)
+) + _interpreter_read_roots()
 
 
 def read_roots(policy: "SandboxPolicy") -> list[str]:

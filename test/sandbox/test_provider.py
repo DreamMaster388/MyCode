@@ -57,6 +57,31 @@ def test_auto_falls_back_to_landlock(monkeypatch, tmp_path):
     assert "workspace-write" in confined.argv
 
 
+def test_landlock_confine_passes_read_roots(monkeypatch, tmp_path):
+    monkeypatch.setattr(BwrapBackend, "available", lambda self: False)
+    monkeypatch.setattr(LandlockBackend, "available", lambda self: True)
+    policy = build_policy(SandboxMode.WORKSPACE_WRITE, str(tmp_path))
+
+    argv = SandboxProvider(policy).confine("echo hi").argv
+    values = [argv[i + 1] for i, tok in enumerate(argv) if tok == "--read-root"]
+
+    assert os.path.realpath(str(tmp_path)) in values
+    assert os.path.realpath("/usr") in values
+    assert argv[-3:] == ("bash", "-c", "echo hi")
+
+
+def test_landlock_read_only_passes_no_write_roots(monkeypatch, tmp_path):
+    monkeypatch.setattr(BwrapBackend, "available", lambda self: False)
+    monkeypatch.setattr(LandlockBackend, "available", lambda self: True)
+    policy = build_policy(SandboxMode.READ_ONLY, str(tmp_path))
+
+    argv = SandboxProvider(policy).confine("echo hi").argv
+    values = [argv[i + 1] for i, tok in enumerate(argv) if tok == "--read-root"]
+
+    assert "--write-root" not in argv
+    assert os.path.realpath(str(tmp_path)) in values
+
+
 def test_forced_bwrap_only(monkeypatch, tmp_path):
     monkeypatch.setattr(BwrapBackend, "available", lambda self: False)
     monkeypatch.setattr(LandlockBackend, "available", lambda self: True)

@@ -1,5 +1,6 @@
 """沙箱可读根(read_roots)的单元测试。"""
 import os
+import sys
 
 from agents.fs import SandboxMode, SandboxPolicy, build_policy, resolve_path
 from agents.sandbox.base import SYSTEM_READ_ROOTS, read_roots
@@ -20,7 +21,22 @@ def test_system_read_roots_are_nonempty_absolute_paths():
     assert all(os.path.isabs(root) for root in SYSTEM_READ_ROOTS)
 
 
+def test_system_read_roots_include_interpreter_prefix():
+    prefixes = {
+        os.path.realpath(p) for p in (sys.prefix, getattr(sys, "base_prefix", "")) if p
+    }
+    assert {os.path.realpath(root) for root in SYSTEM_READ_ROOTS} & prefixes
+
+
 # ---------------- read_roots ----------------
+
+def test_read_roots_includes_interpreter_prefix(tmp_path):
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    roots = read_roots(build_policy(SandboxMode.WORKSPACE_WRITE, str(ws)))
+
+    assert os.path.realpath(sys.prefix) in roots
+
 
 def test_read_roots_includes_system_and_workspace(tmp_path):
     ws = tmp_path / "ws"

@@ -1,6 +1,7 @@
-"""Landlock 后端: 通过独立启动器给 bash 子进程套上内核写围栏。
+"""Landlock 后端: 通过独立启动器给 bash 子进程套上内核读写围栏。
 
-本后端的 confine() 产出 `[python, landlock_exec.py, --mode ..., --write-root ..., --, bash, -c, cmd]`。
+本后端的 confine() 产出
+`[python, landlock_exec.py, --mode ..., --read-root ..., --write-root ..., --, bash, -c, cmd]`。
 之所以走独立脚本(而非在本进程内 preexec_fn), 是为了避开 preexec_fn 的线程安全坑,
 并让"围栏只作用于 bash 子进程、不关住 agent 自身"这一点天然成立。
 """
@@ -16,6 +17,7 @@ from ..fs import SandboxPolicy
 from .base import (
     ConfinedCommand,
     SandboxUnavailableError,
+    read_roots,
     write_roots,
 )
 
@@ -70,6 +72,8 @@ class LandlockBackend:
             "--mode",
             _mode_value(policy.mode),
         ]
+        for root in read_roots(policy):
+            argv += ["--read-root", root]
         for root in write_roots(policy):
             argv += ["--write-root", root]
         argv += ["--", "bash", "-c", command]

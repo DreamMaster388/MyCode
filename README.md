@@ -32,8 +32,8 @@
   工具调用与结果摘要、步数与 token 预算控制，并在预算耗尽时收敛为纯文本结论。
 - **双运行模式**：`plan` / `build` 决定 bash 的沙箱策略——`plan` 只读
   （写入被内核拒绝），`build` 可写项目目录与额外可写根。
-- **写路径沙箱**：以 `realpath` 计算文件身份，写操作必须落在可写根之内；
-  文件工具与 bash 执行共用同一套 `SandboxPolicy` 语义。
+- **读写沙箱**：以 `realpath` 计算文件身份，文件工具的写操作必须落在可写根之内；
+  bash 另由内核围栏强制读写边界（系统/项目/批准目录可读，工作区/批准目录可写）。
 - **专用工具优先**：提供 `Read / Write / Edit / Bash / Grep / Glob`，
   系统提示词要求优先使用专用工具、仅在必要时使用 Bash。
 - **CLI 命令体系**：以 `/` 前缀识别命令（如 `/mode plan`、`/mode build`），
@@ -127,10 +127,10 @@ python -m agents
 工具通过基类能力元数据 `is_write_tool` 与 `path_params`
 （`agents/tools/base.py`）声明自身是否为写工具、哪些参数是路径。
 
-### 3. 内核写围栏 `agents/sandbox/`
+### 3. 内核读写围栏 `agents/sandbox/`
 
 `agents/sandbox/` 是 bash 的**内核级硬边界**：
-bash 命令被包装后执行，写入位置由内核保证，与命令字符串如何书写无关。
+bash 命令被包装后执行，读/写位置由内核保证，与命令字符串如何书写无关。
 
 - 后端：`LandlockBackend`（ctypes 启动器 `landlock_exec.py`，Linux 基线）与
   `BwrapBackend`（挂载 / PID 命名空间，可选）；`SandboxProvider` 默认按
@@ -138,10 +138,12 @@ bash 命令被包装后执行，写入位置由内核保证，与命令字符串
 - 模式映射：`plan -> read-only`（无写根，改不了任何文件，这是 plan 的真正保证）；
   `build -> workspace-write`（仅工作区 + 额外可写根 + 系统临时目录可写，`/dev/null`
   放行）；`danger-full-access` 不包装。
-- 只处理**写**相关权限（write / remove / make / refer / truncate），读与执行不受
-  影响，因此无需为整个文件系统构造读规则。
-- 读围栏尚未接入：`SYSTEM_READ_ROOTS` 与 `read_roots(policy)` 已给出
-  「系统最小集 + 项目/用户批准目录」的读根清单，供后续 Landlock 读规则使用。
+- 读与写都接管：`--read-root` 授予 `read_file` / `read_dir`，`--write-root` 额外授予
+  `write/remove/make/refer/truncate`（写根也可读）；`execute` 不接管。未被任何规则
+  授予的读/写由内核拒绝。
+- 读根 = `SYSTEM_READ_ROOTS`（系统目录 + 当前解释器前缀，保证 `python`/`rg` 等可运行）
+  + 项目目录 + 用户批准目录；`LandlockBackend` 会把 `read_roots(policy)` 逐个作为
+  `--read-root` 传给启动器。
 - Landlock 规则对子进程继续生效，天然覆盖 `env` / `xargs` / `sh -c` / `$(...)` /
   重定向等所有派生写法（例如 `env rm -rf /` 也会被内核拒绝）。
 - 拒绝识别：非零退出且 stderr 命中方言（`permission denied` 等）时，返回
@@ -149,8 +151,9 @@ bash 命令被包装后执行，写入位置由内核保证，与命令字符串
   写法绕过。为稳定匹配，沙箱子进程强制 `LC_ALL=C`。
 - Scripts 采用 `close_fds=True` 执行，避免父进程已打开的可写 fd 被继承而绕过围栏。
 
-**范围与已知边界**：只保证 **FS 写**，且只覆盖被包装的 **bash 子进程**；
-Python 文件工具仍走应用层围栏；**读、网络、资源耗尽**不在本期范围。
+**范围与已知边界**：只保证 **FS 读/写**，且内核围栏只覆盖被包装的 **bash 子进程**；
+Python 文件工具仍走应用层围栏；bwrap 目前仍 `--ro-bind / /`（读侧不收紧），
+网络与资源耗尽不在本期范围。
 
 ---
 
