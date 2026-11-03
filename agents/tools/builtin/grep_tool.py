@@ -3,19 +3,25 @@ from typing import Dict, Any, List, Optional, TYPE_CHECKING
 from ..base import Tool, ToolParameter
 from ..response import ToolResponse
 from ..errors import ToolErrorCode
+from .fs_access import _FsTool
 
 if TYPE_CHECKING:
     from ..registry import ToolRegistry
 
-class GrepTool(Tool):
-    path_params = ("path",)  
+class GrepTool(Tool, _FsTool):
+    access_kind = "read"
+    path_params = ("path",)
+
     def __init__(self, 
                  project_root: str = ".",
-                 registry: Optional['ToolRegistry'] = None):
+                 registry: Optional['ToolRegistry'] = None,
+                 working_dir: Optional[str] = None,
+                 policy=None,
+                 policy_provider=None):
         super().__init__(name="Grep", 
                          description="Search for a pattern in files within the project's working directory and return matching lines.", 
                          expandable=False)
-        self.project_root = project_root
+        self._init_fs(project_root, working_dir, policy, policy_provider)
         self.registry = registry
 
     def get_parameters(self) -> List[ToolParameter]:
@@ -41,6 +47,12 @@ class GrepTool(Tool):
             return ToolResponse.error(code=ToolErrorCode.INVALID_PARAM, 
                                         message="Missing required parameters: 'pattern'.")
 
+        # 读路径先过策略: 可读根之外直接拒绝, 不启动 rg。
+        target_path = parameters.get("path") or "."
+        _, err = self._prepare_read(target_path)
+        if err:
+            return err
+
         cmd = [
         "rg",               # 优先使用 rg，若没有则回退到 grep -r
         "--line-number",    # 显示行号
@@ -49,11 +61,10 @@ class GrepTool(Tool):
         ]
 
         # 添加目标文件
-        if "glob" in parameters:
+        if parameters.get("glob"):
             cmd.extend(["--glob", parameters["glob"]])
 
         # 设置目标路径
-        target_path = parameters.get("path", ".")
         cmd.append(target_path)
 
         import subprocess
@@ -66,7 +77,7 @@ class GrepTool(Tool):
                 text=True,
                 timeout=30,       # 必须设置超时，防止搜索大型 node_modules 卡死
                 env=os.environ,   # 继承环境变量以便找到 rg 二进制
-                cwd=self.project_root  # 在项目根目录下执行
+                cwd=str(self.working_dir)  # 相对路径按 working_dir 解析
             )
             # ripgrep 退出码：0=有匹配，1=无匹配，>1=错误
             if result.returncode == 0:
@@ -87,13 +98,14 @@ class GrepTool(Tool):
     def _fallback_to_grep(self, parameters: Dict[str, Any]) -> ToolResponse:
         """Fallback to grep if rg is not available."""
         pattern = parameters.get("pattern")
+        target_path = parameters.get("path") or "."
         cmd = [
             "grep",
             "-r",               # 递归搜索
             "-n",               # 显示行号
             "-H",               # 显示文件名
             pattern,
-            parameters.get("path", ".")
+            target_path
         ]
 
         import subprocess
@@ -107,7 +119,7 @@ class GrepTool(Tool):
                 text=True,
                 timeout=30,
                 env=os.environ,
-                cwd=os.getcwd()
+                cwd=str(self.working_dir)
             )
             if result.returncode == 0:
                 return ToolResponse.success(text=result.stdout)
@@ -120,5 +132,3 @@ class GrepTool(Tool):
         except subprocess.TimeoutExpired:
             return ToolResponse.error(code=ToolErrorCode.TIMEOUT, 
                                       message="Grep command timed out.")
-
-        

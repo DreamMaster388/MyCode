@@ -52,12 +52,15 @@ def build_agent(workdir: str, max_steps: int = 25) -> CodeAgent:
     # 守卫与工具共用同一 policy, 保证 bash/文件工具的围栏根一致。
     guard = ModeGuard(AgentMode.BUILD, policy=policy)
     for tool in (
-        ReadTool(project_root=workdir, policy=policy),
+        ReadTool(project_root=workdir, policy=policy,
+                 policy_provider=guard.sandbox_policy),
         WriteTool(project_root=workdir, policy=policy),
         EditTool(project_root=workdir, policy=policy),
         BashTool(project_root=workdir, policy=policy, policy_provider=guard.sandbox_policy),
-        GrepTool(project_root=workdir),
-        GlobTool(project_root=workdir),
+        GrepTool(project_root=workdir, policy=policy,
+                 policy_provider=guard.sandbox_policy),
+        GlobTool(project_root=workdir, policy=policy,
+                 policy_provider=guard.sandbox_policy),
     ):
         registry.register_tool(tool)
 

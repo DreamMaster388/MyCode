@@ -3,10 +3,16 @@ from __future__ import annotations
 from typing import Union
 
 from .policy import (
+    AccessDecision,
+    AccessKind,
+    SandboxApprovalRequired,
     SandboxDenied,
     SandboxMode,
     SandboxPolicy,
+    authorize_read,
     authorize_write,
+    evaluate_read,
+    evaluate_write,
     readable_roots,
     writable_roots,
 )
@@ -23,6 +29,8 @@ def build_policy(mode: Union[SandboxMode, str], workspace_root: str) -> SandboxP
 
 __all__ = [
     "FsTarget", "PathError", "resolve_path", "is_within",
+    "AccessKind", "AccessDecision", "SandboxApprovalRequired",
     "SandboxMode", "SandboxPolicy", "SandboxDenied",
-    "authorize_write", "writable_roots", "readable_roots", "build_policy",
+    "authorize_read", "authorize_write", "evaluate_read", "evaluate_write",
+    "writable_roots", "readable_roots", "build_policy",
 ]

@@ -4,9 +4,17 @@ import os
 import pytest
 
 from agents.fs import (
+    AccessDecision,
+    AccessKind,
+    SandboxApprovalRequired,
+    SandboxDenied,
     SandboxMode,
     SandboxPolicy,
+    authorize_read,
+    authorize_write,
     build_policy,
+    evaluate_read,
+    evaluate_write,
     readable_roots,
     resolve_path,
     writable_roots,
@@ -15,7 +23,9 @@ from agents.fs import (
 
 @pytest.fixture
 def workspace(tmp_path):
-    return tmp_path
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    return ws
 
 
 def _policy(mode, workspace, extra_writable=(), extra_readable=()):
@@ -95,3 +105,102 @@ def test_writable_roots_includes_extra_writable(workspace):
     )
     keys = {root.target_key for root in writable_roots(policy)}
     assert os.path.realpath(str(extra)) in keys
+
+
+# ---------------- evaluate_read / authorize_read ----------------
+
+def test_evaluate_read_allows_workspace(workspace):
+    inside = workspace / "a.txt"
+    inside.write_text("x", encoding="utf-8")
+    policy = _policy(SandboxMode.WORKSPACE_WRITE, workspace)
+
+    assert evaluate_read(policy, resolve_path(str(inside), str(workspace))) is AccessDecision.ALLOW
+
+
+def test_evaluate_read_allows_extra_readable(workspace):
+    approved = workspace.parent / "approved-read"
+    approved.mkdir()
+    (approved / "a.txt").write_text("x", encoding="utf-8")
+    policy = _policy(
+        SandboxMode.WORKSPACE_WRITE, workspace,
+        extra_readable=[resolve_path(str(approved), str(workspace))],
+    )
+
+    target = resolve_path(str(approved / "a.txt"), str(workspace))
+    assert evaluate_read(policy, target) is AccessDecision.ALLOW
+
+
+def test_evaluate_read_asks_outside(workspace):
+    outside = workspace.parent / "outside.txt"
+    outside.write_text("secret", encoding="utf-8")
+    policy = _policy(SandboxMode.WORKSPACE_WRITE, workspace)
+
+    target = resolve_path(str(outside), str(workspace))
+    assert evaluate_read(policy, target) is AccessDecision.ASK
+
+
+def test_evaluate_read_danger_allows_outside(workspace):
+    outside = workspace.parent / "outside.txt"
+    outside.write_text("secret", encoding="utf-8")
+    policy = _policy(SandboxMode.DANGER_FULL_ACCESS, workspace)
+
+    target = resolve_path(str(outside), str(workspace))
+    assert evaluate_read(policy, target) is AccessDecision.ALLOW
+
+
+def test_authorize_read_allows_inside(workspace):
+    inside = workspace / "a.txt"
+    inside.write_text("x", encoding="utf-8")
+    policy = _policy(SandboxMode.WORKSPACE_WRITE, workspace)
+
+    assert authorize_read(policy, resolve_path(str(inside), str(workspace))) is None
+
+
+def test_authorize_read_raises_approval_required_outside(workspace):
+    outside = workspace.parent / "outside.txt"
+    outside.write_text("secret", encoding="utf-8")
+    policy = _policy(SandboxMode.WORKSPACE_WRITE, workspace)
+    target = resolve_path(str(outside), str(workspace))
+
+    with pytest.raises(SandboxApprovalRequired) as excinfo:
+        authorize_read(policy, target)
+
+    assert excinfo.value.kind is AccessKind.READ
+    assert excinfo.value.target == target
+    assert excinfo.value.code == "FS_APPROVAL_REQUIRED"
+
+
+# ---------------- evaluate_write / authorize_write ----------------
+
+def test_evaluate_write_decisions(workspace):
+    inside = workspace / "a.txt"
+    outside = workspace.parent / "outside.txt"
+    inside.write_text("x", encoding="utf-8")
+    outside.write_text("x", encoding="utf-8")
+
+    write_policy = _policy(SandboxMode.WORKSPACE_WRITE, workspace)
+    assert evaluate_write(
+        write_policy, resolve_path(str(inside), str(workspace))
+    ) is AccessDecision.ALLOW
+    assert evaluate_write(
+        write_policy, resolve_path(str(outside), str(workspace))
+    ) is AccessDecision.ASK
+
+    assert evaluate_write(
+        _policy(SandboxMode.READ_ONLY, workspace),
+        resolve_path(str(inside), str(workspace)),
+    ) is AccessDecision.DENY
+
+    assert evaluate_write(
+        _policy(SandboxMode.DANGER_FULL_ACCESS, workspace),
+        resolve_path(str(outside), str(workspace)),
+    ) is AccessDecision.ALLOW
+
+
+def test_authorize_write_outside_still_denied(workspace):
+    outside = workspace.parent / "outside.txt"
+    outside.write_text("x", encoding="utf-8")
+    policy = _policy(SandboxMode.WORKSPACE_WRITE, workspace)
+
+    with pytest.raises(SandboxDenied):
+        authorize_write(policy, resolve_path(str(outside), str(workspace)))

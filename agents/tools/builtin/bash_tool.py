@@ -66,7 +66,7 @@ class BashTool(Tool):
         policy = self._current_policy()
         provider = SandboxProvider(policy, backend=self._sandbox_backend)
         try:
-            confined = provider.confine(command)
+            confined = provider.wrap(["bash", "-c", command])
         except SandboxUnavailableError as exc:
             # fail-closed: 没有内核围栏就不执行, 绝不退回无围栏执行。
             return ToolResponse.error(

@@ -46,12 +46,12 @@ def build_agent() -> CodeAgent:
     policy = build_policy(SandboxMode.WORKSPACE_WRITE, ".")
     guard = ModeGuard(AgentMode.BUILD, policy=policy)
     for tool in (
-        ReadTool(policy=policy),
+        ReadTool(policy=policy, policy_provider=guard.sandbox_policy),
         WriteTool(policy=policy),
         EditTool(policy=policy),
         BashTool(policy=policy, policy_provider=guard.sandbox_policy),
-        GrepTool(),
-        GlobTool()
+        GrepTool(policy=policy, policy_provider=guard.sandbox_policy),
+        GlobTool(policy=policy, policy_provider=guard.sandbox_policy)
     ):
         registry.register_tool(tool)
 
