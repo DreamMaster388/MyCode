@@ -1,8 +1,8 @@
 """沙箱后端抽象。
 
-这一层只回答"如何把一条 bash 命令关进内核围栏", 不做策略判定(策略在
-`agents/fs/policy.py`)。BashTool 通过 `SandboxProvider` 拿到具体后端,
-把命令包装成受限 argv 后交给 `subprocess` 执行。
+这一层只回答"如何把任意 argv 关进内核围栏", 不做策略判定(策略在
+`agents/fs/policy.py`)。调用方通过 `SandboxProvider` 拿到具体后端, 把任意
+argv 包装成受限 argv 后交给 `subprocess` 执行。
 
 """
 from __future__ import annotations
@@ -11,7 +11,7 @@ import os
 import sys
 import tempfile
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Protocol, Sequence, runtime_checkable
 
 if TYPE_CHECKING:
     from ..fs import SandboxPolicy
@@ -20,7 +20,7 @@ if TYPE_CHECKING:
 class SandboxUnavailableError(RuntimeError):
     """没有任何可用后端(或用户强制的后端不可用)。
 
-    调用方必须 fail-closed: 拒绝执行 bash, 而不是退回无围栏执行。
+    调用方必须 fail-closed: 拒绝执行外部命令, 而不是退回无围栏执行。
     """
 
     def __init__(self, message: str) -> None:
@@ -70,8 +70,8 @@ class SandboxBackend(Protocol):
         """本机是否可用(探测一次, 实现内部应缓存)。"""
         ...
 
-    def confine(self, command: str, policy: "SandboxPolicy") -> ConfinedCommand:
-        """把命令包装成受限命令。不可用时应抛 SandboxUnavailableError。"""
+    def confine(self, argv: Sequence[str], policy: "SandboxPolicy") -> ConfinedCommand:
+        """把任意 argv 包装成受限命令。不可用时应抛 SandboxUnavailableError。"""
         ...
 
 

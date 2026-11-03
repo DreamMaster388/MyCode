@@ -1,7 +1,7 @@
-"""内核沙箱: 把 bash 子进程关进内核围栏。
+"""内核沙箱: 把任意 argv 关进内核读写围栏。
 
 对外入口:
-- `SandboxProvider`      选择后端并把命令包装成受限 argv。
+- `SandboxProvider.wrap()` 选择后端并把任意 argv 包装成受限 argv。
 - `SandboxUnavailableError` 无可用后端时抛出的信号(调用方 fail-closed)。
 - `ConfinedCommand`      包装结果(argv / 后端 / denial 方言 / env 覆盖)。
 - `read_roots` / `write_roots`  一次执行允许读/写的根。

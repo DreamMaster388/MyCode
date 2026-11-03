@@ -1,14 +1,18 @@
-"""bubblewrap 后端(可选)。
+"""bubblewrap 后端(可选, 降级方案)。
 
 bwrap 隔离更强(挂载命名空间 + PID 命名空间), 但依赖非特权 user namespace。
 在禁用 userns 的环境(如 AppArmor 的 apparmor_restrict_unprivileged_userns=1)
-里探测会失败, provider 会自动回退到 Landlock。
+里探测会失败。
+
+**读围栏说明**: bwrap 仍 `--ro-bind / /` 挂载整盘, 只能提供写围栏,
+**不能限制读范围**; 只有 Landlock 后端会按 read_roots 收窄读范围。
+provider 降级到本后端时, 读限制不可用。
 """
 from __future__ import annotations
 
 import shutil
 import subprocess
-from typing import Optional
+from typing import Optional, Sequence
 
 from ..fs import SandboxMode, SandboxPolicy
 from .base import ConfinedCommand, SandboxUnavailableError, write_roots
@@ -46,12 +50,12 @@ class BwrapBackend:
             return False
         return result.returncode == 0
 
-    def confine(self, command: str, policy: SandboxPolicy) -> ConfinedCommand:
+    def confine(self, argv: Sequence[str], policy: SandboxPolicy) -> ConfinedCommand:
         if not self.available():
             raise SandboxUnavailableError(
                 "bwrap 不可用(缺少 bwrap 或 user namespace 被禁用), 已按 fail-closed 拒绝执行。"
             )
-        argv = [
+        wrapped = [
             "bwrap",
             "--ro-bind", "/", "/",
             "--dev", "/dev",
@@ -60,14 +64,14 @@ class BwrapBackend:
             "--die-with-parent",
         ]
         if policy.mode == SandboxMode.WORKSPACE_WRITE:
-            argv += ["--tmpfs", "/tmp"]
+            wrapped += ["--tmpfs", "/tmp"]
             for root in write_roots(policy):
                 if root == "/tmp":
                     continue
-                argv += ["--bind", root, root]
-        argv += ["--", "bash", "-c", command]
+                wrapped += ["--bind", root, root]
+        wrapped += ["--", *[str(arg) for arg in argv]]
         return ConfinedCommand(
-            argv=tuple(argv),
+            argv=tuple(wrapped),
             backend=self.name,
             env_overrides={"LC_ALL": "C"},
         )

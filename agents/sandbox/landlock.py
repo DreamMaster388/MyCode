@@ -1,9 +1,9 @@
-"""Landlock 后端: 通过独立启动器给 bash 子进程套上内核读写围栏。
+"""Landlock 后端: 通过独立启动器给任意 argv 套上内核读写围栏。
 
 本后端的 confine() 产出
-`[python, landlock_exec.py, --mode ..., --read-root ..., --write-root ..., --, bash, -c, cmd]`。
+`[python, landlock_exec.py, --mode ..., --read-root ..., --write-root ..., --, <argv...>]`。
 之所以走独立脚本(而非在本进程内 preexec_fn), 是为了避开 preexec_fn 的线程安全坑,
-并让"围栏只作用于 bash 子进程、不关住 agent 自身"这一点天然成立。
+并让"围栏只作用于子进程、不关住 agent 自身"这一点天然成立。
 """
 from __future__ import annotations
 
@@ -11,7 +11,7 @@ import os
 import subprocess
 import sys
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Sequence
 
 from ..fs import SandboxPolicy
 from .base import (
@@ -61,24 +61,24 @@ class LandlockBackend:
             return False
         return result.returncode == 0
 
-    def confine(self, command: str, policy: SandboxPolicy) -> ConfinedCommand:
+    def confine(self, argv: Sequence[str], policy: SandboxPolicy) -> ConfinedCommand:
         if not self.available():
             raise SandboxUnavailableError(
                 "Landlock 不可用(内核/启动器探测失败), 已按 fail-closed 拒绝执行。"
             )
-        argv = [
+        wrapped = [
             sys.executable,
             str(self._launcher),
             "--mode",
             _mode_value(policy.mode),
         ]
         for root in read_roots(policy):
-            argv += ["--read-root", root]
+            wrapped += ["--read-root", root]
         for root in write_roots(policy):
-            argv += ["--write-root", root]
-        argv += ["--", "bash", "-c", command]
+            wrapped += ["--write-root", root]
+        wrapped += ["--", *[str(arg) for arg in argv]]
         return ConfinedCommand(
-            argv=tuple(argv),
+            argv=tuple(wrapped),
             backend=self.name,
             # 强制 C locale: 内核/bash 的拒绝信息才会是英文, 供 denial 方言匹配。
             env_overrides={"LC_ALL": "C"},

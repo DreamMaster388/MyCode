@@ -129,12 +129,14 @@ python -m agents
 
 ### 3. 内核读写围栏 `agents/sandbox/`
 
-`agents/sandbox/` 是 bash 的**内核级硬边界**：
-bash 命令被包装后执行，读/写位置由内核保证，与命令字符串如何书写无关。
+`agents/sandbox/` 提供**通用受限命令包装**（`SandboxProvider.wrap(argv)`，当前由
+Bash 工具使用）：任意 argv 被包装后执行，读/写位置由内核保证，与命令如何书写无关。
 
 - 后端：`LandlockBackend`（ctypes 启动器 `landlock_exec.py`，Linux 基线）与
-  `BwrapBackend`（挂载 / PID 命名空间，可选）；`SandboxProvider` 默认按
-  `bwrap -> landlock` 选首个可用后端，**全部不可用则 fail-closed 拒绝执行**。
+  `BwrapBackend`（挂载 / PID 命名空间，可选）；`SandboxProvider` 按
+  `landlock -> bwrap` 选首个可用后端，**全部不可用则 fail-closed 拒绝执行**。
+  Landlock 提供读/写围栏；降级到 bwrap 时只有写围栏（bwrap 仍 `--ro-bind / /`），
+  **读围栏不可用**。
 - 模式映射：`plan -> read-only`（无写根，改不了任何文件，这是 plan 的真正保证）；
   `build -> workspace-write`（仅工作区 + 额外可写根 + 系统临时目录可写，`/dev/null`
   放行）；`danger-full-access` 不包装。
@@ -151,9 +153,9 @@ bash 命令被包装后执行，读/写位置由内核保证，与命令字符�
   写法绕过。为稳定匹配，沙箱子进程强制 `LC_ALL=C`。
 - Scripts 采用 `close_fds=True` 执行，避免父进程已打开的可写 fd 被继承而绕过围栏。
 
-**范围与已知边界**：只保证 **FS 读/写**，且内核围栏只覆盖被包装的 **bash 子进程**；
-Python 文件工具仍走应用层围栏；bwrap 目前仍 `--ro-bind / /`（读侧不收紧），
-网络与资源耗尽不在本期范围。
+**范围与已知边界**：只保证 **FS 读/写**；包装 API 对任意 argv 生效，但当前只有
+Bash 工具接入，其它工具仍走各自实现；Python 文件工具仍走应用层围栏；bwrap 降级时
+读围栏不可用，网络与资源耗尽不在本期范围。
 
 ---
 
@@ -185,7 +187,7 @@ Python 文件工具仍走应用层围栏；bwrap 目前仍 `--ro-bind / /`（读
 | `agents/fs/target.py` | 路径解析与身份判定 seam（`FsTarget`/`resolve_path`/`is_within`） |
 | `agents/fs/policy.py` | 沙箱模式、策略与写授权判定（`SandboxPolicy`/`authorize_write`） |
 | `agents/fs/__init__.py` | 文件系统子包导出 |
-| `agents/sandbox/` | 内核写围栏：`SandboxProvider` + `LandlockBackend`/`BwrapBackend` + `landlock_exec.py` 启动器 |
+| `agents/sandbox/` | 内核读写围栏：`SandboxProvider.wrap(argv)` + `LandlockBackend`/`BwrapBackend` + `landlock_exec.py` 启动器 |
 | `agents/cli/base.py` | CLI 命令抽象基类 `Command` |
 | `agents/cli/registry.py` | 命令注册表 `CommandRegistry`，`/` 前缀识别 |
 | `agents/cli/builtin/mode_command.py` | `/mode` 命令实现 |
@@ -223,7 +225,7 @@ MyCode/
 │   ├── context/                # 上下文构建/历史（含 token 计量）/截断（框架）
 │   ├── core/                   # LLM、Agent 基类、流式、配置（框架）+ mode（自研）
 │   ├── fs/                     # 自研：路径解析与沙箱策略
-│   ├── sandbox/                # 自研：内核写围栏后端（Landlock/bwrap）
+│   ├── sandbox/                # 自研：内核读写围栏后端（Landlock/bwrap）
 │   ├── observability/          # trace 日志（框架）
 │   ├── skill/                  # 技能加载（框架）
 │   └── tools/                  # 工具基类/注册表（框架）+ Bash/Grep/Glob（自研）
