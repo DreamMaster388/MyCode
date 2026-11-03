@@ -10,17 +10,36 @@
 
 - AgentMode: 目前实现 build / plan 两种, trusted 尚未接入。
 - ModeGuard: 持有当前模式、基础策略与用户批准目录, 通过 sandbox_policy()
-  给 bash 内核围栏提供带可读/可写根的策略。
+  给 bash 内核围栏提供带可读/可写根的策略; 通过 request_access() 处理专用
+  工具的外部路径审批: 一次批准只放行本次, 永久批准扩展对应批准目录。
 - check_tool(): 审查逻辑已断开, 恒返回 None; 工具授权改由专用工具审批与内核沙箱承担。
 
 沙箱是最终的硬边界: 不论审批结果如何, 一次调用真正能读写的目录范围都由
 SandboxPolicy 决定; 用户批准目录同样要反映到策略里, 而不是靠放宽命令审查。
 """
+from dataclasses import replace
 from enum import Enum
 from typing import TYPE_CHECKING, Any, Iterable, Optional
 
-from ..fs import FsTarget, SandboxMode, SandboxPolicy, build_policy, resolve_path
+from ..fs import (
+    AccessDecision,
+    AccessKind,
+    FsTarget,
+    SandboxMode,
+    SandboxPolicy,
+    build_policy,
+    evaluate_read,
+    evaluate_write,
+    resolve_path,
+)
 from ..tools.tool_filter import ReadOnlyFilter
+from .approval import (
+    ApprovalDecision,
+    ApprovalHandler,
+    ApprovalRequest,
+    DenyAllHandler,
+    approval_root,
+)
 
 if TYPE_CHECKING:
     from ..tools.base import Tool
@@ -88,13 +107,15 @@ class ModeGuard:
     """模式与沙箱策略的持有者。
 
     负责切换模式、维护用户批准目录, 并把当前模式折算成 SandboxPolicy 交给
-    bash 内核围栏(见 sandbox_policy())。真正的读写边界由沙箱强制, 不在入口处
-    做命令审查。check_tool() 目前恒返回 None: 在后续模式鉴权接入前, 入口守卫
-    不拦截任何调用。
+    bash 内核围栏(见 sandbox_policy())。专用工具访问外部路径时调用
+    request_access(): 策略内直接放行, 策略外交给 approval_handler; 永久批准
+    会写入批准目录并立即反映到后续 sandbox_policy()。check_tool() 目前恒返回
+    None, 入口守卫不拦截任何调用。
     """
 
     def __init__(self, mode: AgentMode = AgentMode.BUILD, project_root: str = ".",
-                 policy: Optional[SandboxPolicy] = None):
+                 policy: Optional[SandboxPolicy] = None,
+                 approval_handler: Optional[ApprovalHandler] = None):
         # 当前模式, 默认 build。
         self.mode = mode
         # 项目根目录: 未显式传 policy 时用它构造默认策略, 也是批准目录的解析基准。
@@ -104,6 +125,8 @@ class ModeGuard:
         # 用户永久批准的可读/可写目录(按 realpath 身份去重, 跨模式保留)。
         self.approved_read_roots: set[FsTarget] = set()
         self.approved_write_roots: set[FsTarget] = set()
+        # 没有交互 handler 时 fail-closed: 外部路径一律拒绝。
+        self.approval_handler: ApprovalHandler = approval_handler or DenyAllHandler()
 
     def set_mode(self, mode: AgentMode) -> None:
         """切换当前模式(例如用户从 plan 切到 build)。"""
@@ -171,6 +194,46 @@ class ModeGuard:
             extra_writable=extra_writable,
             extra_readable=extra_readable,
         )
+
+    # ---------------- 外部路径审批 ----------------
+
+    def request_access(self, request: ApprovalRequest) -> ApprovalDecision:
+        """处理一次外部路径访问请求。
+
+        策略内直接 ALLOW; 策略明确拒绝(如 plan 的写)直接 DENY; 只有 ASK
+        才交给 approval_handler 询问。ALWAYS 把目标归一为目录后写入对应
+        批准集合并返回; ONCE 不改变 guard 状态。
+        """
+        kind = (request.kind if isinstance(request.kind, AccessKind)
+                else AccessKind(request.kind))
+        policy = self.sandbox_policy()
+        if kind is AccessKind.READ:
+            decision = evaluate_read(policy, request.target)
+        else:
+            decision = evaluate_write(policy, request.target)
+
+        if decision is AccessDecision.ALLOW:
+            return ApprovalDecision.ALLOW
+        if decision is AccessDecision.DENY:
+            return ApprovalDecision.DENY
+        # 双保险: plan 的写即使进入 ASK 也不允许审批绕过。
+        if self.mode == AgentMode.PLAN and kind is AccessKind.WRITE:
+            return ApprovalDecision.DENY
+
+        normalized = replace(request, kind=kind, mode=self.mode.value)
+        try:
+            verdict = ApprovalDecision(self.approval_handler.decide(normalized))
+        except Exception:
+            # 审批器异常按拒绝处理, 保证 fail-closed。
+            return ApprovalDecision.DENY
+
+        if verdict is ApprovalDecision.ALWAYS:
+            root = approval_root(request.target)
+            if kind is AccessKind.READ:
+                self.add_read_root(root.display_path)
+            else:
+                self.add_write_root(root.display_path)
+        return verdict
 
     def check_tool(
         self,

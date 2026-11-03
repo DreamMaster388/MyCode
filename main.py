@@ -19,6 +19,7 @@ from agents.core.streaming import StreamEventType
 from agents.tools.registry import ToolRegistry
 from agents.tools.builtin import ReadTool, WriteTool, EditTool, BashTool, GrepTool, GlobTool
 from agents.core.mode import AgentMode, ModeGuard
+from agents.core.approval import ConsoleApprovalHandler
 from agents.cli.registry import CommandRegistry
 from agents.cli.builtin import ModeCommand
 
@@ -44,7 +45,8 @@ def build_agent() -> CodeAgent:
     llm = HelloAgentsLLM()
     registry = ToolRegistry()
     policy = build_policy(SandboxMode.WORKSPACE_WRITE, ".")
-    guard = ModeGuard(AgentMode.BUILD, policy=policy)
+    guard = ModeGuard(AgentMode.BUILD, policy=policy,
+                      approval_handler=ConsoleApprovalHandler())
     for tool in (
         ReadTool(policy=policy, policy_provider=guard.sandbox_policy),
         WriteTool(policy=policy),
