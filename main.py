@@ -21,7 +21,7 @@ from agents.tools.builtin import ReadTool, WriteTool, EditTool, BashTool, GrepTo
 from agents.core.mode import AgentMode, ModeGuard
 from agents.core.approval import ConsoleApprovalHandler
 from agents.cli.registry import CommandRegistry
-from agents.cli.builtin import ModeCommand
+from agents.cli.builtin import AllowCommand, ModeCommand
 
 
 
@@ -85,7 +85,11 @@ def main() -> None:
     agent = build_agent()
     command_register = CommandRegistry()
     command_register.register(ModeCommand())
-    print("=== 编码助手已启动（/mode plan|build|trusted；exit / quit 退出，Ctrl+C 中断）===")
+    command_register.register(AllowCommand())
+    print(
+        "=== 编码助手已启动（模式: /mode plan|build|trusted；"
+        "批准目录: /allow；exit / quit 退出，Ctrl+C 中断）==="
+    )
     try:
         while True:
             try:
@@ -97,7 +101,7 @@ def main() -> None:
                 continue
             if text.lower() in ("exit", "quit"):
                 break
-            if command_register.check_command(text.lower(), agent.mode_guard):
+            if command_register.check_command(text, agent.mode_guard):
                 continue
             try:
                 for event in agent.stream_run(text):

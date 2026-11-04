@@ -89,6 +89,10 @@ python -m agents
 | `/mode plan` | 切换到 plan（只读）模式 |
 | `/mode build` | 切换到 build（可写）模式 |
 | `/mode trusted` | 切换到 trusted（全盘可读、写仍受限、不审批）模式 |
+| `/allow` | 列出当前读/写批准目录 |
+| `/allow read <path>` | 添加可读批准目录（相对项目根解析） |
+| `/allow write <path>` | 添加可写批准目录 |
+| `/allow remove read\|write <path>` | 移除可读/可写批准目录 |
 | `exit` / `quit` | 退出 |
 | `Ctrl+C` | 中断当前会话 |
 
@@ -112,7 +116,8 @@ python -m agents
 
 `ModeGuard` 还维护用户永久批准的可读/可写目录（`add_read_root()` /
 `add_write_root()` 与其 `remove_*` 对应方法）；`sandbox_policy()` 会把批准目录
-并入策略的额外可读/可写根，批准状态跨模式保留。
+并入策略的额外可读/可写根，批准状态跨模式保留。CLI 中可用 `/allow` 查看、
+添加或移除这些目录。
 
 入口守卫 `check_tool()` 目前恒返回 `None`，不再在工具执行前做命令/路径审查；
 工具鉴权体系仍在重构中。
@@ -198,7 +203,9 @@ Bash 工具接入，其它工具仍走各自实现；Python 文件工具仍走�
 | `agents/sandbox/` | 内核读写围栏：`SandboxProvider.wrap(argv)` + `LandlockBackend`/`BwrapBackend` + `landlock_exec.py` 启动器 |
 | `agents/cli/base.py` | CLI 命令抽象基类 `Command` |
 | `agents/cli/registry.py` | 命令注册表 `CommandRegistry`，`/` 前缀识别 |
+| `agents/cli/parsing.py` | CLI 文本解析（命令名与参数） |
 | `agents/cli/builtin/mode_command.py` | `/mode` 命令实现 |
+| `agents/cli/builtin/allow_command.py` | `/allow` 批准目录查看与增删 |
 | `agents/tools/builtin/bash_tool.py` | Bash 执行工具（绑定工作目录与 policy） |
 | `agents/tools/builtin/grep_tool.py` | Grep 内容搜索工具 |
 | `agents/tools/builtin/glob_tool.py` | Glob 文件查找工具 |
