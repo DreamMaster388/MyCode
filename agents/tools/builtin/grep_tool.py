@@ -3,7 +3,7 @@ from typing import Dict, Any, List, Optional, TYPE_CHECKING
 from ..base import Tool, ToolParameter
 from ..response import ToolResponse
 from ..errors import ToolErrorCode
-from .fs_access import _FsTool
+from .fs_access import _FsTool, _permit_scoped
 
 if TYPE_CHECKING:
     from ..registry import ToolRegistry
@@ -17,11 +17,12 @@ class GrepTool(Tool, _FsTool):
                  registry: Optional['ToolRegistry'] = None,
                  working_dir: Optional[str] = None,
                  policy=None,
-                 policy_provider=None):
+                 policy_provider=None,
+                 access_guard=None):
         super().__init__(name="Grep", 
                          description="Search for a pattern in files within the project's working directory and return matching lines.", 
                          expandable=False)
-        self._init_fs(project_root, working_dir, policy, policy_provider)
+        self._init_fs(project_root, working_dir, policy, policy_provider, access_guard)
         self.registry = registry
 
     def get_parameters(self) -> List[ToolParameter]:
@@ -40,6 +41,7 @@ class GrepTool(Tool, _FsTool):
                             required=False)
         ]
 
+    @_permit_scoped
     def run(self, parameters: Dict[str, Any]) -> ToolResponse:
         pattern = parameters.get("pattern")
         

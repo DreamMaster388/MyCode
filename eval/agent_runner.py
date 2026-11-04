@@ -55,14 +55,16 @@ def build_agent(workdir: str, max_steps: int = 25) -> CodeAgent:
                       approval_handler=DenyAllHandler())
     for tool in (
         ReadTool(project_root=workdir, policy=policy,
-                 policy_provider=guard.sandbox_policy),
-        WriteTool(project_root=workdir, policy=policy),
-        EditTool(project_root=workdir, policy=policy),
+                 policy_provider=guard.sandbox_policy, access_guard=guard),
+        WriteTool(project_root=workdir, policy=policy,
+                  policy_provider=guard.sandbox_policy, access_guard=guard),
+        EditTool(project_root=workdir, policy=policy,
+                 policy_provider=guard.sandbox_policy, access_guard=guard),
         BashTool(project_root=workdir, policy=policy, policy_provider=guard.sandbox_policy),
         GrepTool(project_root=workdir, policy=policy,
-                 policy_provider=guard.sandbox_policy),
+                 policy_provider=guard.sandbox_policy, access_guard=guard),
         GlobTool(project_root=workdir, policy=policy,
-                 policy_provider=guard.sandbox_policy),
+                 policy_provider=guard.sandbox_policy, access_guard=guard),
     ):
         registry.register_tool(tool)
 

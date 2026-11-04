@@ -48,12 +48,17 @@ def build_agent() -> CodeAgent:
     guard = ModeGuard(AgentMode.BUILD, policy=policy,
                       approval_handler=ConsoleApprovalHandler())
     for tool in (
-        ReadTool(policy=policy, policy_provider=guard.sandbox_policy),
-        WriteTool(policy=policy),
-        EditTool(policy=policy),
+        ReadTool(policy=policy, policy_provider=guard.sandbox_policy,
+                 access_guard=guard),
+        WriteTool(policy=policy, policy_provider=guard.sandbox_policy,
+                  access_guard=guard),
+        EditTool(policy=policy, policy_provider=guard.sandbox_policy,
+                 access_guard=guard),
         BashTool(policy=policy, policy_provider=guard.sandbox_policy),
-        GrepTool(policy=policy, policy_provider=guard.sandbox_policy),
-        GlobTool(policy=policy, policy_provider=guard.sandbox_policy)
+        GrepTool(policy=policy, policy_provider=guard.sandbox_policy,
+                 access_guard=guard),
+        GlobTool(policy=policy, policy_provider=guard.sandbox_policy,
+                 access_guard=guard)
     ):
         registry.register_tool(tool)
 

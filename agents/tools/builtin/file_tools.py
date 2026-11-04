@@ -27,7 +27,7 @@ from ..response import ToolResponse
 from ..errors import ToolErrorCode
 
 from ...fs import SandboxPolicy
-from .fs_access import _FsTool
+from .fs_access import _FsTool, _permit_scoped
 
 if TYPE_CHECKING:
     from ..registry import ToolRegistry
@@ -60,13 +60,14 @@ class ReadTool(Tool, _FsTool):
         registry: Optional['ToolRegistry'] = None,
         policy: Optional[SandboxPolicy] = None,
         policy_provider=None,
+        access_guard=None,
     ):
         super().__init__(
             name="Read",
             description="读取文件内容或列出目录内容，支持行号范围和元数据缓存",
             expandable=False
         )
-        self._init_fs(project_root, working_dir, policy, policy_provider)
+        self._init_fs(project_root, working_dir, policy, policy_provider, access_guard)
         self.registry = registry
     
     def get_parameters(self) -> List[ToolParameter]:
@@ -93,6 +94,7 @@ class ReadTool(Tool, _FsTool):
             )
         ]
     
+    @_permit_scoped
     def run(self, parameters: Dict[str, Any]) -> ToolResponse:
         """执行文件读取或目录列表"""
         path = parameters.get("path")
@@ -290,13 +292,14 @@ class WriteTool(Tool, _FsTool):
         registry: Optional['ToolRegistry'] = None,
         policy: Optional[SandboxPolicy] = None,
         policy_provider=None,
+        access_guard=None,
     ):
         super().__init__(
             name="Write",
             description="创建或覆盖文件，支持冲突检测和原子写入",
             expandable=False
         )
-        self._init_fs(project_root, working_dir, policy, policy_provider)
+        self._init_fs(project_root, working_dir, policy, policy_provider, access_guard)
         self.registry = registry
 
     def get_parameters(self) -> List[ToolParameter]:
@@ -321,6 +324,7 @@ class WriteTool(Tool, _FsTool):
             )
         ]
 
+    @_permit_scoped
     def run(self, parameters: Dict[str, Any]) -> ToolResponse:
         """执行文件写入"""
         path = parameters.get("path")
@@ -434,13 +438,14 @@ class EditTool(Tool, _FsTool):
         registry: Optional['ToolRegistry'] = None,
         policy: Optional[SandboxPolicy] = None,
         policy_provider=None,
+        access_guard=None,
     ):
         super().__init__(
             name="Edit",
             description="精确替换文件内容，支持冲突检测和自动备份",
             expandable=False
         )
-        self._init_fs(project_root, working_dir, policy, policy_provider)
+        self._init_fs(project_root, working_dir, policy, policy_provider, access_guard)
         self.registry = registry
 
     def get_parameters(self) -> List[ToolParameter]:
@@ -471,6 +476,7 @@ class EditTool(Tool, _FsTool):
             )
         ]
 
+    @_permit_scoped
     def run(self, parameters: Dict[str, Any]) -> ToolResponse:
         """执行文件编辑"""
         path = parameters.get("path")
@@ -595,13 +601,14 @@ class MultiEditTool(Tool, _FsTool):
         registry: Optional['ToolRegistry'] = None,
         policy: Optional[SandboxPolicy] = None,
         policy_provider=None,
+        access_guard=None,
     ):
         super().__init__(
             name="MultiEdit",
             description="批量替换文件内容，支持原子性和冲突检测",
             expandable=False
         )
-        self._init_fs(project_root, working_dir, policy, policy_provider)
+        self._init_fs(project_root, working_dir, policy, policy_provider, access_guard)
         self.registry = registry
 
     def get_parameters(self) -> List[ToolParameter]:
@@ -626,6 +633,7 @@ class MultiEditTool(Tool, _FsTool):
             )
         ]
 
+    @_permit_scoped
     def run(self, parameters: Dict[str, Any]) -> ToolResponse:
         """执行批量编辑"""
         path = parameters.get("path")
