@@ -127,12 +127,15 @@ def _rule_access(read_roots, write_roots, read_bits: int,
                  write_bits: int) -> dict[str, int]:
     """计算每个路径应授予的访问位: 读根只读, 写根读写; 同路径合并去重。
 
+    读根可能是文件(如 /etc/passwd): 文件只授予 read_file, 因为对文件
+    授予 read_dir 会被内核以 EINVAL 拒绝; 目录授予完整的 read 位。
     返回 {realpath: allowed_access}; 插入顺序保留, 便于确定性测试。
     """
     access: dict[str, int] = {}
     for root in read_roots:
         real = os.path.realpath(root)
-        access[real] = access.get(real, 0) | read_bits
+        bits = read_bits if os.path.isdir(real) else _ACCESS_FS["read_file"]
+        access[real] = access.get(real, 0) | bits
     for root in write_roots:
         real = os.path.realpath(root)
         access[real] = access.get(real, 0) | read_bits | write_bits
@@ -162,7 +165,7 @@ def _add_path_rule(ruleset_fd: int, path: str, allowed: int) -> bool:
 def _apply(read_roots: list[str], write_roots: list[str]) -> None:
     """给当前进程套上读写围栏。
 
-    - 读根: 授予 read_file/read_dir;
+    - 读根: 目录授予 read_file/read_dir, 文件只授予 read_file;
     - 写根: 额外授予 write/remove/make/refer/truncate(故写根也可读);
     - /dev/null 额外放行 write_file(常见重定向目标);
     - 未被授予的读/写一律由内核拒绝。

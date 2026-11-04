@@ -98,6 +98,18 @@ def test_rule_access_read_root_is_read_only(tmp_path):
     assert access[os.path.realpath(str(tmp_path))] == read_bits
 
 
+def test_rule_access_file_read_root_grants_read_file_only(tmp_path):
+    """文件读根不能授予 read_dir: 内核会对文件返回 EINVAL。"""
+    data = tmp_path / "data.txt"
+    data.write_text("x", encoding="utf-8")
+    read_bits = _ACCESS_FS["read_file"] | _ACCESS_FS["read_dir"]
+    write_bits = _ACCESS_FS["write_file"]
+
+    access = _rule_access([str(data)], [], read_bits, write_bits)
+
+    assert access[os.path.realpath(str(data))] == _ACCESS_FS["read_file"]
+
+
 def test_rule_access_write_root_is_read_write(tmp_path):
     read_bits = _ACCESS_FS["read_file"] | _ACCESS_FS["read_dir"]
     write_bits = _ACCESS_FS["write_file"]
@@ -190,6 +202,19 @@ def test_read_inside_read_roots_allowed(home_sandbox):
     assert "hello" in r.stdout
 
 
+def test_explicit_file_read_root_allowed(home_sandbox):
+    """显式批准的文件读根可用; 文件只授予 read_file 不会触发 EINVAL。"""
+    _, ws, outside = home_sandbox
+    with open(outside, "w", encoding="utf-8") as fh:
+        fh.write("approved")
+    r = _run(
+        "workspace-write", f"cat {outside}",
+        read_roots=_read_roots(ws) + [outside], write_roots=[ws],
+    )
+    assert r.returncode == 0, r.stderr
+    assert "approved" in r.stdout
+
+
 def test_read_outside_read_roots_denied(home_sandbox):
     _, ws, outside = home_sandbox
     with open(outside, "w", encoding="utf-8") as fh:
@@ -235,6 +260,36 @@ def test_rg_version_runs_under_read_fence(home_sandbox):
     )
     assert r.returncode == 0, r.stderr
     assert "ripgrep" in r.stdout
+
+
+def test_common_commands_start_under_converged_read_roots(home_sandbox):
+    """收敛后的系统读根仍能启动常用命令。"""
+    _, ws, _ = home_sandbox
+    data = os.path.join(ws, "data.txt")
+    with open(data, "w", encoding="utf-8") as fh:
+        fh.write("hello")
+    subprocess.run(["git", "init", "-q", ws], check=True)
+
+    checks = [
+        (f"{sys.executable} -c pass", None),
+        (f"{sys.executable} -m pytest --version", "pytest"),
+        (f"git -C {ws} status --short", None),
+        ("sh -c true", None),
+        (f"ls {ws}", "data.txt"),
+        (f"cat {data}", "hello"),
+    ]
+    rg = shutil.which("rg")
+    if rg is not None:
+        checks.append((f"{rg} --version", "ripgrep"))
+
+    for command, expected in checks:
+        result = _run(
+            "workspace-write", command,
+            read_roots=_read_roots(ws), write_roots=[ws],
+        )
+        assert result.returncode == 0, (command, result.stderr)
+        if expected is not None:
+            assert expected in result.stdout, (command, result.stdout)
 
 
 def test_bad_arguments_fail_closed():

@@ -153,12 +153,13 @@ Bash 工具使用）：任意 argv 被包装后执行，读/写位置由内核�
   `build -> workspace-write`（仅工作区 + 额外可写根 + 系统临时目录可写，`/dev/null`
   放行）；`trusted -> workspace-write + read_all`（全盘读根，写根仍受限）；
   `danger-full-access` 不包装。
-- 读与写都接管：`--read-root` 授予 `read_file` / `read_dir`，`--write-root` 额外授予
-  `write/remove/make/refer/truncate`（写根也可读）；`execute` 不接管。未被任何规则
-  授予的读/写由内核拒绝。
-- 读根 = `SYSTEM_READ_ROOTS`（系统目录 + 当前解释器前缀，保证 `python`/`rg` 等可运行）
-  + 项目目录 + 用户批准目录；`LandlockBackend` 会把 `read_roots(policy)` 逐个作为
-  `--read-root` 传给启动器。
+- 读与写都接管：`--read-root` 对目录授予 `read_file` / `read_dir`，对文件只授予
+  `read_file`；`--write-root` 额外授予 `write/remove/make/refer/truncate`（写根也可读）；
+  `execute` 不接管。未被任何规则授予的读/写由内核拒绝。
+- 读根 = `SYSTEM_READ_ROOTS`（`/usr` 与兼容别名、`/dev`、`/etc/ssl`、`/etc` 下
+  必要文件、当前解释器前缀，保证 `python`/`rg`/`git` 等可运行）+ 项目目录 +
+  用户批准目录；不再整目录放开 `/etc`、`/proc`、`/sys`。`LandlockBackend` 会把
+  `read_roots(policy)` 逐个作为 `--read-root` 传给启动器。
 - Landlock 规则对子进程继续生效，天然覆盖 `env` / `xargs` / `sh -c` / `$(...)` /
   重定向等所有派生写法（例如 `env rm -rf /` 也会被内核拒绝）。
 - 拒绝识别：非零退出且 stderr 命中方言（`permission denied` 等）时，返回

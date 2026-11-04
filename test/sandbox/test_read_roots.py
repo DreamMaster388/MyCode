@@ -47,11 +47,20 @@ def test_read_roots_includes_system_and_workspace(tmp_path):
     existing_system = {
         os.path.realpath(root)
         for root in SYSTEM_READ_ROOTS
-        if os.path.isdir(os.path.realpath(root))
+        if os.path.exists(os.path.realpath(root))
     }
     assert existing_system <= set(roots)
     assert all(isinstance(root, str) for root in roots)
     assert len(roots) == len(set(roots))
+
+
+def test_system_read_roots_are_converged():
+    """系统读根按用途收敛, 不再整目录放开 /etc、/proc、/sys。"""
+    assert "/etc" not in SYSTEM_READ_ROOTS
+    assert "/proc" not in SYSTEM_READ_ROOTS
+    assert "/sys" not in SYSTEM_READ_ROOTS
+    assert "/etc/ssl" in SYSTEM_READ_ROOTS
+    assert "/etc/passwd" in SYSTEM_READ_ROOTS
 
 
 def test_read_roots_includes_extra_readable(tmp_path):
@@ -77,6 +86,20 @@ def test_read_roots_skips_missing_dirs(tmp_path):
     )
 
     assert os.path.realpath(str(missing)) not in read_roots(policy)
+
+
+def test_read_roots_includes_existing_files(tmp_path):
+    """读根可以是文件(如 /etc/passwd), 启动器会只授予 read_file。"""
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    secret = tmp_path / "approved.txt"
+    secret.write_text("x", encoding="utf-8")
+    policy = _policy(
+        SandboxMode.WORKSPACE_WRITE, ws,
+        [resolve_path(str(secret), str(ws))],
+    )
+
+    assert os.path.realpath(str(secret)) in read_roots(policy)
 
 
 def test_read_roots_dedups_workspace_alias(tmp_path):
