@@ -19,11 +19,13 @@ from .policy import (
 from .target import FsTarget, PathError, is_within, resolve_path
 
 
-def build_policy(mode: Union[SandboxMode, str], workspace_root: str) -> SandboxPolicy:
+def build_policy(mode: Union[SandboxMode, str], workspace_root: str,
+                 read_all: bool = False) -> SandboxPolicy:
     """按模式与工作区根构造策略; workspace_root 会先解析成稳定身份。"""
     return SandboxPolicy(
         mode=mode if isinstance(mode, SandboxMode) else SandboxMode(mode),
         workspace_root=resolve_path(workspace_root, workspace_root),
+        read_all=read_all,
     )
 
 

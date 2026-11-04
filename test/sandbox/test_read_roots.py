@@ -104,3 +104,12 @@ def test_read_roots_danger_full_access_returns_empty(tmp_path):
     ws.mkdir()
 
     assert read_roots(build_policy(SandboxMode.DANGER_FULL_ACCESS, str(ws))) == []
+
+
+def test_read_roots_read_all_returns_root(tmp_path):
+    ws = tmp_path / "ws"
+    ws.mkdir()
+
+    policy = build_policy(SandboxMode.WORKSPACE_WRITE, str(ws), read_all=True)
+
+    assert read_roots(policy) == ["/"]

@@ -9,9 +9,11 @@ import pytest
 
 from agents.core.mode import AgentMode, ModeGuard
 from agents.fs import (
+    AccessDecision,
     SandboxMode,
     SandboxPolicy,
     build_policy,
+    evaluate_write,
     readable_roots,
     resolve_path,
     writable_roots,
@@ -33,8 +35,10 @@ def write_policy(workspace):
 def test_agent_mode_values():
     assert AgentMode.BUILD == "build"
     assert AgentMode.PLAN == "plan"
+    assert AgentMode.TRUSTED == "trusted"
     assert AgentMode("build") is AgentMode.BUILD
     assert AgentMode("plan") is AgentMode.PLAN
+    assert AgentMode("trusted") is AgentMode.TRUSTED
 
 
 # ---------------- 构造与默认策略 ----------------
@@ -221,3 +225,74 @@ def test_sandbox_policy_preserves_danger_full_access_mode(workspace):
 
     assert policy.mode is SandboxMode.DANGER_FULL_ACCESS
     assert writable_roots(policy) == []
+
+
+# ---------------- trusted ----------------
+
+def test_trusted_default_policy_is_workspace_write_read_all(workspace):
+    guard = ModeGuard(AgentMode.TRUSTED, project_root=str(workspace))
+
+    assert guard.policy.mode is SandboxMode.WORKSPACE_WRITE
+    assert guard.policy.read_all is True
+
+    policy = guard.sandbox_policy()
+    assert policy.mode is SandboxMode.WORKSPACE_WRITE
+    assert policy.read_all is True
+    assert [root.target_key for root in readable_roots(policy)] == ["/"]
+    assert os.path.realpath(str(workspace)) in {
+        root.target_key for root in writable_roots(policy)
+    }
+
+
+def test_trusted_does_not_widen_explicit_danger_policy(workspace):
+    outside = workspace.parent / "outside.txt"
+    outside.write_text("x", encoding="utf-8")
+    danger = build_policy(SandboxMode.DANGER_FULL_ACCESS, str(workspace))
+    guard = ModeGuard(AgentMode.TRUSTED, policy=danger)
+
+    policy = guard.sandbox_policy()
+
+    assert policy.mode is SandboxMode.WORKSPACE_WRITE
+    assert policy.read_all is True
+    # 写越界仍需审批, 不能被 danger 策略直接 ALLOW。
+    assert evaluate_write(
+        policy, resolve_path(str(outside), str(workspace))
+    ) is AccessDecision.ASK
+
+
+def test_trusted_keeps_approved_write_roots(workspace):
+    guard = ModeGuard(AgentMode.TRUSTED, project_root=str(workspace))
+    approved_read = workspace / "approved-read"
+    approved_write = workspace / "approved-write"
+    approved_read.mkdir()
+    approved_write.mkdir()
+    guard.add_read_root(str(approved_read))
+    guard.add_write_root(str(approved_write))
+
+    policy = guard.sandbox_policy()
+
+    assert os.path.realpath(str(approved_write)) in {
+        root.target_key for root in writable_roots(policy)
+    }
+    assert [root.target_key for root in readable_roots(policy)] == ["/"]
+
+
+def test_set_mode_to_trusted_rebuilds_and_back(workspace):
+    guard = ModeGuard(AgentMode.BUILD, project_root=str(workspace))
+    assert guard.sandbox_policy().read_all is False
+
+    guard.set_mode(AgentMode.TRUSTED)
+    assert guard.mode is AgentMode.TRUSTED
+    assert guard.sandbox_policy().read_all is True
+
+    guard.set_mode(AgentMode.BUILD)
+    assert guard.sandbox_policy().read_all is False
+
+
+def test_mode_string_is_normalized(workspace):
+    guard = ModeGuard("trusted", project_root=str(workspace))
+    assert guard.mode is AgentMode.TRUSTED
+    assert guard.policy.read_all is True
+
+    guard.set_mode("build")
+    assert guard.mode is AgentMode.BUILD

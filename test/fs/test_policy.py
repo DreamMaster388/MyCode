@@ -28,7 +28,8 @@ def workspace(tmp_path):
     return ws
 
 
-def _policy(mode, workspace, extra_writable=(), extra_readable=()):
+def _policy(mode, workspace, extra_writable=(), extra_readable=(),
+            read_all=False):
     """以工作区根构造策略, 便于显式挂载额外读/写根。"""
     root = resolve_path(str(workspace), str(workspace))
     return SandboxPolicy(
@@ -36,6 +37,7 @@ def _policy(mode, workspace, extra_writable=(), extra_readable=()):
         workspace_root=root,
         extra_writable=tuple(extra_writable),
         extra_readable=tuple(extra_readable),
+        read_all=read_all,
     )
 
 
@@ -204,3 +206,55 @@ def test_authorize_write_outside_still_denied(workspace):
 
     with pytest.raises(SandboxDenied):
         authorize_write(policy, resolve_path(str(outside), str(workspace)))
+
+
+# ---------------- read_all(trusted) ----------------
+
+def test_read_all_defaults_to_false(workspace):
+    policy = build_policy(SandboxMode.WORKSPACE_WRITE, str(workspace))
+    assert policy.read_all is False
+
+
+def test_build_policy_sets_read_all(workspace):
+    policy = build_policy(SandboxMode.WORKSPACE_WRITE, str(workspace), read_all=True)
+    assert policy.read_all is True
+
+
+def test_readable_roots_read_all_returns_root(workspace):
+    policy = _policy(SandboxMode.WORKSPACE_WRITE, workspace, read_all=True)
+
+    roots = readable_roots(policy)
+
+    assert [root.target_key for root in roots] == ["/"]
+
+
+def test_evaluate_read_read_all_allows_outside(workspace):
+    outside = workspace.parent / "outside.txt"
+    outside.write_text("secret", encoding="utf-8")
+    policy = _policy(SandboxMode.WORKSPACE_WRITE, workspace, read_all=True)
+
+    target = resolve_path(str(outside), str(workspace))
+    assert evaluate_read(policy, target) is AccessDecision.ALLOW
+
+
+def test_authorize_read_read_all_allows_outside(workspace):
+    outside = workspace.parent / "outside.txt"
+    outside.write_text("secret", encoding="utf-8")
+    policy = _policy(SandboxMode.WORKSPACE_WRITE, workspace, read_all=True)
+
+    assert authorize_read(policy, resolve_path(str(outside), str(workspace))) is None
+
+
+def test_read_all_does_not_widen_writes(workspace):
+    outside = workspace.parent / "outside.txt"
+    outside.write_text("x", encoding="utf-8")
+    target = resolve_path(str(outside), str(workspace))
+
+    # workspace-write + read_all: 读全盘, 写根外仍需审批(不直接 ALLOW)。
+    assert evaluate_write(
+        _policy(SandboxMode.WORKSPACE_WRITE, workspace, read_all=True), target
+    ) is AccessDecision.ASK
+    # read-only + read_all: 读全盘, 写仍明确拒绝。
+    assert evaluate_write(
+        _policy(SandboxMode.READ_ONLY, workspace, read_all=True), target
+    ) is AccessDecision.DENY

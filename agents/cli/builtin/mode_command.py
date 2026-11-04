@@ -10,5 +10,7 @@ class ModeCommand(Command):
             guard.set_mode(AgentMode.PLAN)
         elif text == '/mode build':
             guard.set_mode(AgentMode.BUILD)
+        elif text == '/mode trusted':
+            guard.set_mode(AgentMode.TRUSTED)
         else:
             print("未知的参数")

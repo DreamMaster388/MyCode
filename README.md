@@ -2,7 +2,7 @@
 
 基于开源框架 **HelloAgents** 二次开发的本地命令行编码助手（Coding Agent）。
 在框架的智能体、上下文工程与工具系统之上，本项目自行实现了编码智能体主循环、
-双模式安全沙箱、流式交互、CLI 命令体系与 SWE-bench 风格评测框架。
+三模式安全沙箱、流式交互、CLI 命令体系与 SWE-bench 风格评测框架。
 
 - 框架来源：HelloAgents（https://github.com/jjyaoao/HelloAgents）
 - 作者 / 维护者：jjyaoao（https://github.com/jjyaoao）
@@ -30,14 +30,15 @@
 
 - **编码智能体主循环**：`CodeAgent` 基于 Function Calling，支持流式思考/正文输出、
   工具调用与结果摘要、步数与 token 预算控制，并在预算耗尽时收敛为纯文本结论。
-- **双运行模式**：`plan` / `build` 决定 bash 的沙箱策略——`plan` 只读
-  （写入被内核拒绝），`build` 可写项目目录与额外可写根。
+- **三运行模式**：`plan` / `build` / `trusted` 决定沙箱策略——`plan` 只读
+  （写入被内核拒绝），`build` 可写项目目录与额外可写根，`trusted` 全盘可读、
+  写仍限项目目录与批准目录且不审批。
 - **读写沙箱**：以 `realpath` 计算文件身份，文件工具的写操作必须落在可写根之内；
   bash 另由内核围栏强制读写边界（系统/项目/批准目录可读，工作区/批准目录可写）。
 - **专用工具优先**：提供 `Read / Write / Edit / Bash / Grep / Glob`，
   系统提示词要求优先使用专用工具、仅在必要时使用 Bash。
-- **CLI 命令体系**：以 `/` 前缀识别命令（如 `/mode plan`、`/mode build`），
-  在提交给 LLM 前拦截。
+- **CLI 命令体系**：以 `/` 前缀识别命令（如 `/mode plan`、`/mode build`、
+  `/mode trusted`），在提交给 LLM 前拦截。
 - **可观测性**：将每轮模型输出、工具调用与结果记录到 `memory/traces/`。
 - **本地评测**：SWE-bench 风格 harness，在隔离仓库中运行 agent、提取补丁、
   跑测试并按 FAIL_TO_PASS / PASS_TO_PASS 判定是否解决。
@@ -77,7 +78,7 @@ python -m agents
 (plan)  你> 阅读 agents/fs/policy.py 并总结写授权逻辑
 ```
 
-- 括号内为当前模式（`build` / `plan`）。
+- 括号内为当前模式（`build` / `plan` / `trusted`）。
 - 思考过程以 `🧠` 前缀流式打印，正文逐字输出。
 - 每次工具调用先打印 `Executing tool: <name>`，再打印结果摘要。
 
@@ -87,6 +88,7 @@ python -m agents
 | --- | --- |
 | `/mode plan` | 切换到 plan（只读）模式 |
 | `/mode build` | 切换到 build（可写）模式 |
+| `/mode trusted` | 切换到 trusted（全盘可读、写仍受限、不审批）模式 |
 | `exit` / `quit` | 退出 |
 | `Ctrl+C` | 中断当前会话 |
 
@@ -104,7 +106,9 @@ python -m agents
 把模式折算成 `SandboxPolicy` 交给 bash 内核围栏：
 
 - `plan` -> `read-only`：bash 没有可写根，写入被内核拒绝；
-- `build` -> 沿配置的策略（通常 `workspace-write`），可写工作区与额外可写根。
+- `build` -> 沿配置的策略（通常 `workspace-write`），可写工作区与额外可写根；
+- `trusted` -> `workspace-write` + `read_all`：全盘可读，写仍限项目目录与批准目录，
+  且不触发专用工具审批（也不会被显式 `danger-full-access` 策略放宽写边界）。
 
 `ModeGuard` 还维护用户永久批准的可读/可写目录（`add_read_root()` /
 `add_write_root()` 与其 `remove_*` 对应方法）；`sandbox_policy()` 会把批准目录
@@ -119,10 +123,13 @@ python -m agents
   `FsTarget`（`target_key` 用 `os.path.realpath`），`is_within()` 按身份判断父子关系。
 - `agents/fs/policy.py`：
   - `SandboxMode`：`read-only` / `workspace-write` / `danger-full-access`；
-  - `SandboxPolicy`：工作区根 + 额外可写根 + 额外可读根；
-  - `writable_roots()` / `readable_roots()`：可写根 / 可读根（项目目录 + 批准根）；
-  - `authorize_write()`：放行返回 `None`，拒绝抛 `SandboxDenied`。
-- 文件工具与 bash 执行都消费 `SandboxPolicy`，写授权统一由 `authorize_write()` 判定。
+  - `SandboxPolicy`：工作区根 + 额外可写根 + 额外可读根 + `read_all`；
+  - `writable_roots()` / `readable_roots()`：可写根 / 可读根（项目目录 + 批准根；
+    `read_all` 时可读根为 `/`）；
+  - `authorize_read()` / `authorize_write()`：放行返回 `None`，拒绝抛
+    `SandboxDenied` 或 `SandboxApprovalRequired`。
+- 文件工具与 bash 执行都消费 `SandboxPolicy`，读写授权统一由
+  `authorize_read()` / `authorize_write()` 判定。
 
 工具通过基类能力元数据 `is_write_tool` 与 `path_params`
 （`agents/tools/base.py`）声明自身是否为写工具、哪些参数是路径。
@@ -139,7 +146,8 @@ Bash 工具使用）：任意 argv 被包装后执行，读/写位置由内核�
   **读围栏不可用**。
 - 模式映射：`plan -> read-only`（无写根，改不了任何文件，这是 plan 的真正保证）；
   `build -> workspace-write`（仅工作区 + 额外可写根 + 系统临时目录可写，`/dev/null`
-  放行）；`danger-full-access` 不包装。
+  放行）；`trusted -> workspace-write + read_all`（全盘读根，写根仍受限）；
+  `danger-full-access` 不包装。
 - 读与写都接管：`--read-root` 授予 `read_file` / `read_dir`，`--write-root` 额外授予
   `write/remove/make/refer/truncate`（写根也可读）；`execute` 不接管。未被任何规则
   授予的读/写由内核拒绝。
@@ -183,9 +191,9 @@ Bash 工具接入，其它工具仍走各自实现；Python 文件工具仍走�
 | 模块 | 说明 |
 | --- | --- |
 | `agents/agent/code_agent.py` | 编码智能体主循环，流式 `stream_run`，工具执行/输出截断/步数与 token 预算/收尾兜底 |
-| `agents/core/mode.py` | `AgentMode`（build/plan）与 `ModeGuard`（模式到 `SandboxPolicy` 的映射） |
+| `agents/core/mode.py` | `AgentMode`（build/plan/trusted）与 `ModeGuard`（模式到 `SandboxPolicy` 的映射、审批入口） |
 | `agents/fs/target.py` | 路径解析与身份判定 seam（`FsTarget`/`resolve_path`/`is_within`） |
-| `agents/fs/policy.py` | 沙箱模式、策略与写授权判定（`SandboxPolicy`/`authorize_write`） |
+| `agents/fs/policy.py` | 沙箱模式、策略与读写授权判定（`SandboxPolicy`/`authorize_read`/`authorize_write`） |
 | `agents/fs/__init__.py` | 文件系统子包导出 |
 | `agents/sandbox/` | 内核读写围栏：`SandboxProvider.wrap(argv)` + `LandlockBackend`/`BwrapBackend` + `landlock_exec.py` 启动器 |
 | `agents/cli/base.py` | CLI 命令抽象基类 `Command` |

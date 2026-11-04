@@ -8,7 +8,7 @@
               专用工具审批, bash 工具不审批。
     trusted : 可读 全盘; 可写 项目目录 + 用户批准目录; 不审批。
 
-- AgentMode: 目前实现 build / plan 两种, trusted 尚未接入。
+- AgentMode: 实现 build / plan / trusted 三种模式。
 - ModeGuard: 持有当前模式、基础策略与用户批准目录, 通过 sandbox_policy()
   给 bash 内核围栏提供带可读/可写根的策略; 通过 request_access() 处理专用
   工具的外部路径审批: 一次批准只放行本次, 永久批准扩展对应批准目录。
@@ -49,14 +49,13 @@ class AgentMode(str, Enum):
     """Agent 的运行模式。
 
     继承 (str, Enum) 是为了让成员本身也是字符串:
-    - 可以直接与字符串 'build'/'plan' 比较, 也方便 JSON 序列化/日志输出。
+    - 可以直接与字符串 'build'/'plan'/'trusted' 比较, 也方便 JSON 序列化/日志输出。
 
-    目标设计见 101-总体目标.md: plan/build/trusted 三种模式;
-    当前仅接入 plan 与 build。
     """
 
-    BUILD = 'build'  # 构建模式: 可写项目目录与额外可写根
-    PLAN = "plan"    # 规划模式: 只读探索代码, 无任何可写目录
+    BUILD = 'build'      # 构建模式: 可写项目目录与额外可写根
+    PLAN = "plan"        # 规划模式: 只读探索代码, 无任何可写目录
+    TRUSTED = "trusted"  # 信任模式: 全盘可读, 写仍限项目与批准目录, 不审批
 
 
 # plan 模式可用的只读工具(与 agents/tools/tool_filter.py 的 ReadOnlyFilter 同源,
@@ -76,11 +75,16 @@ PLAN_HINT = (
 def _default_policy(mode: 'AgentMode', project_root: str) -> SandboxPolicy:
     """按模式构造默认沙箱策略。
 
-    plan 没有可写目录 -> 只读; build 可写项目目录 -> workspace-write
-    (额外可写根需要显式传入 policy 提供)。
+    plan 没有可写目录 -> 只读;
+    build 可写项目目录 -> workspace-write;
+    trusted 全盘可读、写仍限项目目录 -> workspace-write + read_all。
+    (额外可写根需要显式传入 policy 提供)
     """
-    sandbox_mode = SandboxMode.READ_ONLY if mode == AgentMode.PLAN else SandboxMode.WORKSPACE_WRITE
-    return build_policy(sandbox_mode, project_root)
+    if mode is AgentMode.PLAN:
+        return build_policy(SandboxMode.READ_ONLY, project_root)
+    if mode is AgentMode.TRUSTED:
+        return build_policy(SandboxMode.WORKSPACE_WRITE, project_root, read_all=True)
+    return build_policy(SandboxMode.WORKSPACE_WRITE, project_root)
 
 
 def _with_root(roots: set[FsTarget], target: FsTarget) -> set[FsTarget]:
@@ -116,12 +120,12 @@ class ModeGuard:
     def __init__(self, mode: AgentMode = AgentMode.BUILD, project_root: str = ".",
                  policy: Optional[SandboxPolicy] = None,
                  approval_handler: Optional[ApprovalHandler] = None):
-        # 当前模式, 默认 build。
-        self.mode = mode
+        # 当前模式, 默认 build; 允许传入字符串并归一为 AgentMode。
+        self.mode = mode if isinstance(mode, AgentMode) else AgentMode(mode)
         # 项目根目录: 未显式传 policy 时用它构造默认策略, 也是批准目录的解析基准。
         self.project_root = project_root
         self._explicit_policy = policy
-        self.policy = policy or _default_policy(mode, project_root)
+        self.policy = policy or _default_policy(self.mode, project_root)
         # 用户永久批准的可读/可写目录(按 realpath 身份去重, 跨模式保留)。
         self.approved_read_roots: set[FsTarget] = set()
         self.approved_write_roots: set[FsTarget] = set()
@@ -130,10 +134,10 @@ class ModeGuard:
 
     def set_mode(self, mode: AgentMode) -> None:
         """切换当前模式(例如用户从 plan 切到 build)。"""
-        self.mode = mode
+        self.mode = mode if isinstance(mode, AgentMode) else AgentMode(mode)
         # 未显式传 policy 时, 模式切换需重建默认策略, 否则 plan->build 会残留只读策略。
         if self._explicit_policy is None:
-            self.policy = _default_policy(mode, self.project_root)
+            self.policy = _default_policy(self.mode, self.project_root)
 
     # ---------------- 用户批准目录 ----------------
 
@@ -173,14 +177,19 @@ class ModeGuard:
         可读根 = 项目目录 + 基础策略的额外可读根 + 用户批准读;
         可写根 = 项目目录 + 基础策略的额外可写根 + 用户批准写。
         plan 模式没有可写目录, 因此产出 read-only 策略并清空写根。
+        trusted 强制 workspace-write + read_all: 读全盘, 写仍受限;
+        即使显式传入 danger 策略也不会放宽写边界。
         """
         base = self.policy
-        if self.mode == AgentMode.PLAN:
+        if self.mode is AgentMode.PLAN:
             mode = SandboxMode.READ_ONLY
-        elif isinstance(base.mode, SandboxMode):
-            mode = base.mode
+            read_all = False
+        elif self.mode is AgentMode.TRUSTED:
+            mode = SandboxMode.WORKSPACE_WRITE
+            read_all = True
         else:
-            mode = SandboxMode(base.mode)
+            mode = base.mode if isinstance(base.mode, SandboxMode) else SandboxMode(base.mode)
+            read_all = base.read_all
 
         extra_readable = _merge_roots(base.extra_readable, self.approved_read_roots)
         if mode == SandboxMode.READ_ONLY:
@@ -193,6 +202,7 @@ class ModeGuard:
             workspace_root=base.workspace_root,
             extra_writable=extra_writable,
             extra_readable=extra_readable,
+            read_all=read_all,
         )
 
     # ---------------- 外部路径审批 ----------------
@@ -217,7 +227,10 @@ class ModeGuard:
         if decision is AccessDecision.DENY:
             return ApprovalDecision.DENY
         # 双保险: plan 的写即使进入 ASK 也不允许审批绕过。
-        if self.mode == AgentMode.PLAN and kind is AccessKind.WRITE:
+        if self.mode is AgentMode.PLAN and kind is AccessKind.WRITE:
+            return ApprovalDecision.DENY
+        # trusted 不审批: 读已由 read_all 放行, 写越界直接拒绝, 不询问。
+        if self.mode is AgentMode.TRUSTED and kind is AccessKind.WRITE:
             return ApprovalDecision.DENY
 
         normalized = replace(request, kind=kind, mode=self.mode.value)

@@ -85,7 +85,7 @@ def main() -> None:
     agent = build_agent()
     command_register = CommandRegistry()
     command_register.register(ModeCommand())
-    print("=== 编码助手已启动（输入 exit / quit 退出，Ctrl+C 中断）===")
+    print("=== 编码助手已启动（/mode plan|build|trusted；exit / quit 退出，Ctrl+C 中断）===")
     try:
         while True:
             try:

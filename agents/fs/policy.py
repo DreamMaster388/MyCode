@@ -9,7 +9,7 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import Union
 
-from .target import FsTarget, is_within
+from .target import FsTarget, is_within, resolve_path
 
 
 class SandboxMode(str, Enum):
@@ -47,12 +47,14 @@ class SandboxPolicy:
     workspace_root : 工作区根(已解析为稳定身份), 同时也是默认可读/可写根。
     extra_writable : 额外可写根(用户批准目录、临时目录等; 默认空)。
     extra_readable : 额外可读根(用户批准目录; 默认空)。
+    read_all       : 全盘可读(trusted 模式); 写仍受可写根限制。
     """
 
     mode: SandboxMode
     workspace_root: FsTarget
     extra_writable: tuple[FsTarget, ...] = ()
     extra_readable: tuple[FsTarget, ...] = ()
+    read_all: bool = False
 
 
 class SandboxDenied(Exception):
@@ -105,9 +107,12 @@ def writable_roots(policy: SandboxPolicy) -> list[FsTarget]:
 def readable_roots(policy: SandboxPolicy) -> list[FsTarget]:
     """当前策略下的可读根列表: 用户批准根 + 项目目录根。
 
+    read_all(trusted) 时返回根目录 "/", 表示全盘可读;
     与 writable_roots 不同, 可读根与 mode 无关(任何模式都要能读项目与批准目录);
     系统命令所需的最小读根由沙箱层(SYSTEM_READ_ROOTS)补充。
     """
+    if policy.read_all:
+        return [resolve_path("/", "/")]
     seen: set[str] = set()
     roots: list[FsTarget] = []
     for root in (policy.workspace_root, *policy.extra_readable):
@@ -120,11 +125,12 @@ def readable_roots(policy: SandboxPolicy) -> list[FsTarget]:
 def evaluate_read(policy: SandboxPolicy, target: FsTarget) -> AccessDecision:
     """读判定: 可读根内放行, 根外进入审批。
 
-    danger-full-access 表示不限制, 直接放行。系统读根只服务于命令沙箱,
-    不在这里参与判定, 避免 Python 文件工具读 /proc、/etc 等系统路径。
+    read_all(trusted) 与 danger-full-access 表示不限制, 直接放行。
+    系统读根只服务于命令沙箱, 不在这里参与判定, 避免 Python 文件工具
+    读 /proc、/etc 等系统路径。
     """
     mode = _as_mode(policy.mode)
-    if mode == SandboxMode.DANGER_FULL_ACCESS:
+    if policy.read_all or mode == SandboxMode.DANGER_FULL_ACCESS:
         return AccessDecision.ALLOW
     if any(is_within(root, target) for root in readable_roots(policy)):
         return AccessDecision.ALLOW

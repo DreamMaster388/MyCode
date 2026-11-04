@@ -256,7 +256,7 @@ def test_bash_wrap_receives_approved_root(sandbox, monkeypatch):
     assert len(handler.requests) == 1  # 只有 ALWAYS 那次, bash 不审批
 
 
-# ---------------- plan / 无 guard / bash ----------------
+# ---------------- plan / trusted / 无 guard / bash ----------------
 
 def test_plan_write_denied_without_asking(sandbox):
     ws, outside = sandbox
@@ -269,6 +269,34 @@ def test_plan_write_denied_without_asking(sandbox):
     assert resp.status is ToolStatus.ERROR
     assert handler.requests == []
     assert not (outside / "x.txt").exists()
+
+
+def test_trusted_read_outside_does_not_ask(sandbox):
+    ws, outside = sandbox
+    handler = ScriptedHandler(ApprovalDecision.DENY)
+    guard = _guard(ws, handler, mode=AgentMode.TRUSTED)
+    tool = _tool(ReadTool, ws, guard)
+
+    resp = tool.run({"path": str(outside / "secret.txt")})
+
+    assert resp.status is ToolStatus.SUCCESS
+    assert "secret" in resp.text
+    assert handler.requests == []
+
+
+def test_trusted_write_outside_denied_without_asking(sandbox):
+    ws, outside = sandbox
+    handler = ScriptedHandler(ApprovalDecision.ALWAYS)
+    guard = _guard(ws, handler, mode=AgentMode.TRUSTED)
+    tool = _tool(WriteTool, ws, guard)
+    target = outside / "x.txt"
+
+    resp = tool.run({"path": str(target), "content": "x"})
+
+    assert resp.status is ToolStatus.ERROR
+    assert _APPROVAL_MARKER in resp.text
+    assert handler.requests == []
+    assert not target.exists()
 
 
 def test_without_guard_outside_read_is_strict_denied(sandbox):

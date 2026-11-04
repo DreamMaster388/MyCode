@@ -132,12 +132,15 @@ SYSTEM_READ_ROOTS: tuple[str, ...] = (
 def read_roots(policy: "SandboxPolicy") -> list[str]:
     """一次执行允许读取的根(系统最小集 + 策略可读根)。
 
+    - read_all(trusted) 直接返回 ["/"]: 全盘可读, 写仍由 write_roots 限制;
     - 可读根 = SYSTEM_READ_ROOTS + readable_roots(policy)(项目目录 + 用户批准根);
     - 与 write_roots 一致: realpath 归一、去重、只保留已存在目录;
     - danger-full-access 不包装执行, 返回空(表示不做读限制)。
     """
     from ..fs import SandboxMode, readable_roots
 
+    if getattr(policy, "read_all", False):
+        return ["/"]
     if policy.mode == SandboxMode.DANGER_FULL_ACCESS:
         return []
     candidates = list(SYSTEM_READ_ROOTS)
