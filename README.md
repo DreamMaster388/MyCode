@@ -102,44 +102,58 @@ python -m agents
 
 ## 安全模型
 
-核心原则：**默认拒绝**——沙箱后端不可用时拒绝执行，而不是猜测安全后放行。
+核心原则：**默认拒绝**。一次调用真正能读写的范围由 `SandboxPolicy` 决定；策略之外的
+访问由专用工具审批或内核围栏拦截；沙箱后端不可用时拒绝执行，而不是退回无围栏执行。
 
-### 1. 模式与沙箱策略 `ModeGuard`
+### 1. 三种模式
 
-`agents/core/mode.py` 的 `ModeGuard` 持有当前模式，并通过 `sandbox_policy()`
-把模式折算成 `SandboxPolicy` 交给 bash 内核围栏：
+`agents/core/mode.py` 的 `ModeGuard` 持有当前模式、基础策略与用户批准目录，
+`sandbox_policy()` 把模式折算成 `SandboxPolicy` 交给 bash 内核围栏：
 
-- `plan` -> `read-only`：bash 没有可写根，写入被内核拒绝；
-- `build` -> 沿配置的策略（通常 `workspace-write`），可写工作区与额外可写根；
-- `trusted` -> `workspace-write` + `read_all`：全盘可读，写仍限项目目录与批准目录，
-  且不触发专用工具审批（也不会被显式 `danger-full-access` 策略放宽写边界）。
+| 模式 | 专用工具可读 | 可写 | 专用工具审批 | bash |
+| --- | --- | --- | --- | --- |
+| `plan` | 项目目录 + 批准目录 | 无 | 外部读需审批；写直接拒绝 | 内核围栏，不审批 |
+| `build` | 项目目录 + 批准目录 | 项目目录 + 批准目录 | 外部读/写需审批 | 内核围栏，不审批 |
+| `trusted` | 全盘 | 项目目录 + 批准目录 | 不审批；越界写直接拒绝 | 全盘读、写受限，不审批 |
 
-`ModeGuard` 还维护用户永久批准的可读/可写目录（`add_read_root()` /
-`add_write_root()` 与其 `remove_*` 对应方法）；`sandbox_policy()` 会把批准目录
-并入策略的额外可读/可写根，批准状态跨模式保留。CLI 中可用 `/allow` 查看、
-添加或移除这些目录。
+- 表中的“专用工具可读”不含系统读根；系统读根只服务于 bash 命令执行。
+- `trusted` 映射为 `workspace-write + read_all`，不会映射成 `danger-full-access`，
+  写边界仍受项目目录与批准目录限制。
+- 用 `/mode plan|build|trusted` 切换；批准目录跨模式保留。
 
-入口守卫 `check_tool()` 目前恒返回 `None`，不再在工具执行前做命令/路径审查；
-工具鉴权体系仍在重构中。
+### 2. 专用工具审批
 
-### 2. 文件系统沙箱与策略
+`Read / Grep / Glob / Write / Edit / MultiEdit` 在访问可读/可写根之外的路径时，
+会通过 `ModeGuard.request_access()` 请求用户决定：
 
-- `agents/fs/target.py`：路径解析 seam。`resolve_path()` 把路径解析为稳定身份
-  `FsTarget`（`target_key` 用 `os.path.realpath`），`is_within()` 按身份判断父子关系。
+- `o` 本次（ONCE）：只放行当前工具调用，不修改策略；写操作在本次调用内的临时文件
+  与 `.backups` 派生路径沿用同一临时许可，调用结束即丢弃。
+- `a` 永久（ALWAYS）：把目标归一为目录（目录取自身，文件取父目录）加入批准目录；
+  后续专用工具与 bash 通过共享的 `sandbox_policy()` 立即获得新根。
+- `d` 拒绝（DENY）：返回 `[sandbox: approval denied]`，不执行、不落盘。
+- 默认 `DenyAllHandler` 无交互 fail-closed；`plan` 的写与 `trusted` 的所有越界访问
+  不进入审批，直接拒绝。
+- `/allow` 查看批准目录；`/allow read <path>`、`/allow write <path>` 添加；
+  `/allow remove read|write <path>` 移除。路径相对项目根解析。
+- 永久批准目前只保存在当前会话内存中，不跨进程持久化。
+
+### 3. 文件系统策略
+
+- `agents/fs/target.py`：`resolve_path()` 把路径解析为稳定身份 `FsTarget`
+  （`target_key` 用 `os.path.realpath`），`is_within()` 按身份判断父子关系。
 - `agents/fs/policy.py`：
   - `SandboxMode`：`read-only` / `workspace-write` / `danger-full-access`；
   - `SandboxPolicy`：工作区根 + 额外可写根 + 额外可读根 + `read_all`；
-  - `writable_roots()` / `readable_roots()`：可写根 / 可读根（项目目录 + 批准根；
-    `read_all` 时可读根为 `/`）；
-  - `authorize_read()` / `authorize_write()`：放行返回 `None`，拒绝抛
-    `SandboxDenied` 或 `SandboxApprovalRequired`。
-- 文件工具与 bash 执行都消费 `SandboxPolicy`，读写授权统一由
-  `authorize_read()` / `authorize_write()` 判定。
+  - `writable_roots()` / `readable_roots()`：可写根 / 可读根（`read_all` 时为 `/`）；
+  - `evaluate_read()` / `evaluate_write()`：返回 `ALLOW` / `ASK` / `DENY`；
+  - `authorize_read()` / `authorize_write()`：策略内的严格封装，越界抛
+    `SandboxApprovalRequired` / `SandboxDenied`。
+- 文件工具通过基类元数据 `access_kind`（`read`/`write`）与 `path_params`
+  （`agents/tools/base.py`）声明路径访问方式；`fs_access.py` 统一执行授权与审批。
+- 文件工具的读边界是**项目目录 + 用户批准目录**；系统读根（`/usr`、`/dev` 等）
+  只进入 bash 的内核围栏，不放开给 Python 文件工具。
 
-工具通过基类能力元数据 `is_write_tool` 与 `path_params`
-（`agents/tools/base.py`）声明自身是否为写工具、哪些参数是路径。
-
-### 3. 内核读写围栏 `agents/sandbox/`
+### 4. 内核读写围栏
 
 `agents/sandbox/` 提供**通用受限命令包装**（`SandboxProvider.wrap(argv)`，当前由
 Bash 工具使用）：任意 argv 被包装后执行，读/写位置由内核保证，与命令如何书写无关。
@@ -147,29 +161,25 @@ Bash 工具使用）：任意 argv 被包装后执行，读/写位置由内核�
 - 后端：`LandlockBackend`（ctypes 启动器 `landlock_exec.py`，Linux 基线）与
   `BwrapBackend`（挂载 / PID 命名空间，可选）；`SandboxProvider` 按
   `landlock -> bwrap` 选首个可用后端，**全部不可用则 fail-closed 拒绝执行**。
-  Landlock 提供读/写围栏；降级到 bwrap 时只有写围栏（bwrap 仍 `--ro-bind / /`），
-  **读围栏不可用**。
-- 模式映射：`plan -> read-only`（无写根，改不了任何文件，这是 plan 的真正保证）；
-  `build -> workspace-write`（仅工作区 + 额外可写根 + 系统临时目录可写，`/dev/null`
-  放行）；`trusted -> workspace-write + read_all`（全盘读根，写根仍受限）；
-  `danger-full-access` 不包装。
+- Landlock 提供读写围栏；降级到 bwrap 时 bwrap 仍 `--ro-bind / /`，只有写围栏，
+  **读围栏不可用**。需要读限制时应使用 Landlock。
+- 模式映射：`plan -> read-only`；`build -> workspace-write`；`trusted -> workspace-write
+  + read_all`；`danger-full-access` 不包装。
 - 读与写都接管：`--read-root` 对目录授予 `read_file` / `read_dir`，对文件只授予
-  `read_file`；`--write-root` 额外授予 `write/remove/make/refer/truncate`（写根也可读）；
-  `execute` 不接管。未被任何规则授予的读/写由内核拒绝。
+  `read_file`；`--write-root` 额外授予 `write/remove/make/refer/truncate`
+  （写根也可读）；`execute` 不接管。未被任何规则授予的读/写由内核拒绝。
 - 读根 = `SYSTEM_READ_ROOTS`（`/usr` 与兼容别名、`/dev`、`/etc/ssl`、`/etc` 下
-  必要文件、当前解释器前缀，保证 `python`/`rg`/`git` 等可运行）+ 项目目录 +
-  用户批准目录；不再整目录放开 `/etc`、`/proc`、`/sys`。`LandlockBackend` 会把
-  `read_roots(policy)` 逐个作为 `--read-root` 传给启动器。
+  必要文件、当前解释器前缀）+ 项目目录 + 用户批准目录；不再整目录放开 `/etc`、
+  `/proc`、`/sys`。
 - Landlock 规则对子进程继续生效，天然覆盖 `env` / `xargs` / `sh -c` / `$(...)` /
-  重定向等所有派生写法（例如 `env rm -rf /` 也会被内核拒绝）。
-- 拒绝识别：非零退出且 stderr 命中方言（`permission denied` 等）时，返回
-  `[sandbox: file access denied under <mode> mode]`，提示模型这是策略拒绝、不要换
-  写法绕过。为稳定匹配，沙箱子进程强制 `LC_ALL=C`。
-- Scripts 采用 `close_fds=True` 执行，避免父进程已打开的可写 fd 被继承而绕过围栏。
+  重定向等所有派生写法。
+- 拒绝识别：非零退出且 stderr 命中方言时返回
+  `[sandbox: file access denied under <mode> mode]`；脚本采用 `close_fds=True`，
+  避免父进程已打开的可写 fd 被继承而绕过围栏。
 
-**范围与已知边界**：只保证 **FS 读/写**；包装 API 对任意 argv 生效，但当前只有
-Bash 工具接入，其它工具仍走各自实现；Python 文件工具仍走应用层围栏；bwrap 降级时
-读围栏不可用，网络与资源耗尽不在本期范围。
+**范围与已知边界**：只保证 **FS 读/写**；目前只有 Bash 工具接入内核 argv 包装，
+Python 文件工具走应用层策略 + 审批；bwrap 降级时读围栏不可用；网络与资源耗尽
+不在本期范围。
 
 ---
 
@@ -217,11 +227,11 @@ Bash 工具接入，其它工具仍走各自实现；Python 文件工具仍走�
 
 | 文件 | 改动内容 |
 | --- | --- |
-| `agents/core/agent.py` | 接入 `ModeGuard`，工具执行前统一鉴权 |
+| `agents/core/agent.py` | 接入 `ModeGuard`，用于模式切换与工具共享策略 |
 | `agents/core/llm.py` | 新增带工具调用的流式接口 `stream_invoke_with_tools` |
 | `agents/core/llm_response.py` | 新增流式 chunk 类型与 `ToolCall` 结构 |
 | `agents/core/llm_adapters.py` | 适配流式工具调用 |
-| `agents/tools/base.py` | 新增能力元数据 `is_write_tool` / `path_params`，新增 `brief()` 结果摘要 |
+| `agents/tools/base.py` | 新增能力元数据 `access_kind` / `path_params`，新增 `brief()` 结果摘要 |
 | `agents/tools/builtin/file_tools.py` | `Read/Write/Edit` 接入路径 policy 与沙箱鉴权 |
 | `agents/tools/builtin/__init__.py` | 导出新增工具 |
 | `main.py` | 改为消费 `stream_run` 的流式交互入口，注册命令与守卫 |

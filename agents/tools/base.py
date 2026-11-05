@@ -60,12 +60,10 @@ class Tool(ABC):
     - 支持结构化的状态、数据和错误信息
     """
 
-    # ── 能力元数据(供 ModeGuard/文件工具做路径授权) ──
-    # 该工具是否会产生写操作。注意: bash 由 ModeGuard 按命令特判, 不依赖此标志。
-    is_write_tool: bool = False
-    # 路径访问类别: "read" 或 "write"; 供文件类工具统一选择读/写授权。
+    # ── 能力元数据(供文件类工具做路径授权) ──
+    # 路径访问类别: "read" 或 "write"; 文件类工具据此选择读/写授权。
     access_kind: str = "read"
-    # 哪些参数是文件/目录路径; 写工具据此对每个路径参数做路径沙箱。
+    # 哪些参数是文件/目录路径; 文件类工具据此对每个路径参数做授权。
     path_params: tuple[str, ...] = ()
 
     def __init__(self, name: str, description: str, expandable: bool = False) -> None:

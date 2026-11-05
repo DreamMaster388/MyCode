@@ -49,7 +49,6 @@ class ReadTool(Tool, _FsTool):
     - limit: 最大行数（可选，默认 2000，仅文件有效）
     """
 
-    is_write_tool = False          # 读工具: 不围栏(默认值, 显式声明便于阅读)
     access_kind = "read"
     path_params = ("path",)
     
@@ -281,7 +280,6 @@ class WriteTool(Tool, _FsTool):
     - file_mtime_ms: 缓存的 mtime（可选，用于冲突检测）
     """
 
-    is_write_tool = True
     access_kind = "write"
     path_params = ("path",)
 
@@ -427,7 +425,6 @@ class EditTool(Tool, _FsTool):
     - file_mtime_ms: 缓存的 mtime（可选）
     """
 
-    is_write_tool = True
     access_kind = "write"
     path_params = ("path",)
 
@@ -590,7 +587,6 @@ class MultiEditTool(Tool, _FsTool):
     - file_mtime_ms: 缓存的 mtime（可选）
     """
 
-    is_write_tool = True
     access_kind = "write"
     path_params = ("path",)
 

@@ -16,7 +16,7 @@ from .docker_sandbox import DockerSandbox
 
 
 class _ContainerTool(Tool):
-    is_write_tool = False
+    access_kind = "read"
     path_params: tuple[str, ...] = ()
 
     def __init__(self, name: str, description: str, sandbox: DockerSandbox) -> None:
@@ -53,7 +53,7 @@ class ContainerReadTool(_ContainerTool):
 
 
 class ContainerWriteTool(_ContainerTool):
-    is_write_tool = True
+    access_kind = "write"
     path_params = ("path",)
 
     def __init__(self, sandbox: DockerSandbox) -> None:
@@ -81,7 +81,7 @@ class ContainerWriteTool(_ContainerTool):
 
 
 class ContainerEditTool(_ContainerTool):
-    is_write_tool = True
+    access_kind = "write"
     path_params = ("path",)
 
     def __init__(self, sandbox: DockerSandbox) -> None:

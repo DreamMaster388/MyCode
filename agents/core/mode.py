@@ -12,14 +12,13 @@
 - ModeGuard: 持有当前模式、基础策略与用户批准目录, 通过 sandbox_policy()
   给 bash 内核围栏提供带可读/可写根的策略; 通过 request_access() 处理专用
   工具的外部路径审批: 一次批准只放行本次, 永久批准扩展对应批准目录。
-- check_tool(): 审查逻辑已断开, 恒返回 None; 工具授权改由专用工具审批与内核沙箱承担。
 
 沙箱是最终的硬边界: 不论审批结果如何, 一次调用真正能读写的目录范围都由
 SandboxPolicy 决定; 用户批准目录同样要反映到策略里, 而不是靠放宽命令审查。
 """
 from dataclasses import replace
 from enum import Enum
-from typing import TYPE_CHECKING, Any, Iterable, Optional
+from typing import Iterable, Optional
 
 from ..fs import (
     AccessDecision,
@@ -32,7 +31,6 @@ from ..fs import (
     evaluate_write,
     resolve_path,
 )
-from ..tools.tool_filter import ReadOnlyFilter
 from .approval import (
     ApprovalDecision,
     ApprovalHandler,
@@ -41,9 +39,6 @@ from .approval import (
     approval_root,
 )
 
-if TYPE_CHECKING:
-    from ..tools.base import Tool
-
 
 class AgentMode(str, Enum):
     """Agent 的运行模式。
@@ -51,25 +46,12 @@ class AgentMode(str, Enum):
     继承 (str, Enum) 是为了让成员本身也是字符串:
     - 可以直接与字符串 'build'/'plan'/'trusted' 比较, 也方便 JSON 序列化/日志输出。
 
+    目标设计见 101-总体目标.md: plan/build/trusted 三种模式。
     """
 
     BUILD = 'build'      # 构建模式: 可写项目目录与额外可写根
     PLAN = "plan"        # 规划模式: 只读探索代码, 无任何可写目录
     TRUSTED = "trusted"  # 信任模式: 全盘可读, 写仍限项目与批准目录, 不审批
-
-
-# plan 模式可用的只读工具(与 agents/tools/tool_filter.py 的 ReadOnlyFilter 同源,
-# 避免两处漂移; 工具名统一小写后比较)。
-# 入口守卫的审查逻辑断开后, 本常量暂未参与判定, 保留给后续工具审批逻辑使用。
-PLAN_READONLY_TOOLS = frozenset(name.lower() for name in ReadOnlyFilter.READONLY_TOOLS)
-
-# 注入给模型的系统提示: 告诉它当前处于 plan 模式。
-# 注意这只是"软约束"(引导模型别乱来); 真正的硬边界是沙箱策略(不可写),
-# 专用工具访问外部路径时另走审批流程, bash 工具则不在入口处审批。
-PLAN_HINT = (
-    "你现在处于 plan(规划)模式: 只可读取/探索代码与运行只读命令(如 ls/cat/grep/git status), "
-    "并为后续构建制定方案; 严禁写文件、编辑、删除或运行任何会修改系统的命令。"
-)
 
 
 def _default_policy(mode: 'AgentMode', project_root: str) -> SandboxPolicy:
@@ -113,8 +95,7 @@ class ModeGuard:
     负责切换模式、维护用户批准目录, 并把当前模式折算成 SandboxPolicy 交给
     bash 内核围栏(见 sandbox_policy())。专用工具访问外部路径时调用
     request_access(): 策略内直接放行, 策略外交给 approval_handler; 永久批准
-    会写入批准目录并立即反映到后续 sandbox_policy()。check_tool() 目前恒返回
-    None, 入口守卫不拦截任何调用。
+    会写入批准目录并立即反映到后续 sandbox_policy()。
     """
 
     def __init__(self, mode: AgentMode = AgentMode.BUILD, project_root: str = ".",
@@ -247,12 +228,3 @@ class ModeGuard:
             else:
                 self.add_write_root(root.display_path)
         return verdict
-
-    def check_tool(
-        self,
-        tool_name: str,
-        args: dict[str, Any],
-        tool: Optional["Tool"] = None,
-        read_only: Optional[bool] = None,
-    ) -> Optional[str]:
-        return None
