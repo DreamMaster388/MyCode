@@ -65,7 +65,13 @@ def main() -> None:
     )
     parser.add_argument("--model-name", default=DEFAULT_MODEL_NAME)
     parser.add_argument("--prepull", action="store_true", help="运行前顺序预拉全部镜像（避免并发限流）")
+    parser.add_argument(
+        "--no-path-guard",
+        action="store_true",
+        help="关闭容器内文件工具的路径校验（消融实验用；默认开启）",
+    )
     args = parser.parse_args()
+    path_guard = not args.no_path_guard
 
     ids = args.instance_ids or (list(DEV_INSTANCE_IDS) if args.dev else None)
     instances = load_instances(args.dataset, args.split, ids)
@@ -79,7 +85,7 @@ def main() -> None:
     out_dir.mkdir(parents=True, exist_ok=True)
 
     print(f"数据集: {args.dataset} ({args.split})")
-    print(f"实例数: {len(instances)}  workers={args.workers}  max_steps={args.max_steps}  network={args.network}")
+    print(f"实例数: {len(instances)}  workers={args.workers}  max_steps={args.max_steps}  network={args.network}  path_guard={path_guard}")
     print(f"输出目录: {out_dir}\n")
 
     results: list[dict] = []
@@ -96,6 +102,7 @@ def main() -> None:
                     args.pull_timeout,
                     args.keep_container,
                     network=args.network,
+                    path_guard=path_guard,
                 ): inst["instance_id"]
                 for inst in instances
             }
@@ -116,6 +123,7 @@ def main() -> None:
                 args.pull_timeout,
                 args.keep_container,
                 network=args.network,
+                path_guard=path_guard,
             )
             results.append(rec)
             done += 1
