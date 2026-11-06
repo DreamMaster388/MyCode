@@ -12,6 +12,7 @@ from agents.tools.base import Tool, ToolParameter
 from agents.tools.errors import ToolErrorCode
 from agents.tools.response import ToolResponse
 
+from .container_path_guard import DENIAL_MARKER, DENY_EXIT
 from .docker_sandbox import DockerSandbox
 
 
@@ -22,6 +23,14 @@ class _ContainerTool(Tool):
     def __init__(self, name: str, description: str, sandbox: DockerSandbox) -> None:
         super().__init__(name=name, description=description, expandable=False)
         self.sandbox = sandbox
+
+    @staticmethod
+    def _guard_error(res) -> Optional[ToolResponse]:
+        """容器内守卫拒绝统一映射为 ACCESS_DENIED; 其它结果返回 None。"""
+        if res.rc != DENY_EXIT:
+            return None
+        message = (res.out or res.err).strip() or DENIAL_MARKER
+        return ToolResponse.error(code=ToolErrorCode.ACCESS_DENIED, message=message)
 
 
 class ContainerReadTool(_ContainerTool):
@@ -45,6 +54,9 @@ class ContainerReadTool(_ContainerTool):
         if not path:
             return ToolResponse.error(code=ToolErrorCode.INVALID_PARAM, message="Missing required parameter: 'path'.")
         res = self.sandbox.read_text(path, int(parameters.get("offset") or 0), int(parameters.get("limit") or 2000))
+        denied = self._guard_error(res)
+        if denied:
+            return denied
         if res.rc == 0:
             return ToolResponse.success(text=res.out or "(empty)")
         if res.rc == 2:
@@ -75,6 +87,9 @@ class ContainerWriteTool(_ContainerTool):
         if not path or content is None:
             return ToolResponse.error(code=ToolErrorCode.INVALID_PARAM, message="Missing required parameters: 'path' and 'content'.")
         res = self.sandbox.write_text(path, content)
+        denied = self._guard_error(res)
+        if denied:
+            return denied
         if res.ok:
             return ToolResponse.success(text=res.out.strip())
         return ToolResponse.error(code=ToolErrorCode.EXECUTION_ERROR, message=(res.err or res.out).strip())
@@ -104,6 +119,9 @@ class ContainerEditTool(_ContainerTool):
         if not path or "old_string" not in parameters or "new_string" not in parameters:
             return ToolResponse.error(code=ToolErrorCode.INVALID_PARAM, message="Missing required parameters: 'path', 'old_string', 'new_string'.")
         res = self.sandbox.edit_text(path, parameters["old_string"], parameters["new_string"])
+        denied = self._guard_error(res)
+        if denied:
+            return denied
         if res.ok:
             return ToolResponse.success(text=res.out.strip())
         if res.rc in (2, 3):
@@ -169,6 +187,9 @@ class ContainerGrepTool(_ContainerTool):
         if not pattern:
             return ToolResponse.error(code=ToolErrorCode.INVALID_PARAM, message="Missing required parameter: 'pattern'.")
         res = self.sandbox.grep(pattern, parameters.get("path") or ".", parameters.get("glob"))
+        denied = self._guard_error(res)
+        if denied:
+            return denied
         if res.rc in (0, 1):
             return ToolResponse.success(text=res.out.strip() or "No matches found.")
         return ToolResponse.error(code=ToolErrorCode.EXECUTION_ERROR, message=(res.err or res.out).strip())
@@ -193,6 +214,9 @@ class ContainerGlobTool(_ContainerTool):
         if not pattern:
             return ToolResponse.error(code=ToolErrorCode.INVALID_PARAM, message="Missing required parameter: 'pattern'.")
         res = self.sandbox.glob_files(pattern, parameters.get("path") or ".")
+        denied = self._guard_error(res)
+        if denied:
+            return denied
         if res.ok:
             return ToolResponse.success(text=res.out.strip() or "No files found.")
         return ToolResponse.error(code=ToolErrorCode.EXECUTION_ERROR, message=(res.err or res.out).strip())

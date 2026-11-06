@@ -19,6 +19,7 @@ from dataclasses import dataclass
 from typing import Optional, Sequence
 
 from .build_patch import PATCH_MAX_BYTES, PATCH_MAX_FILE_BYTES, module_source
+from .container_path_guard import module_source as guard_source
 
 CONTAINER_WORKDIR = "/testbed"
 DEFAULT_PY = "/opt/miniconda3/bin/python"
@@ -78,7 +79,7 @@ print(f"wrote {len(data)} chars to {p}")
 _EDIT_SCRIPT = r"""
 import json, sys
 d = json.load(sys.stdin)
-p, old, new = d["path"], d["old"], d["new"]
+p, old, new = sys.argv[1], d["old"], d["new"]
 with open(p, encoding="utf-8") as f:
     s = f.read()
 n = s.count(old)
@@ -140,6 +141,7 @@ class DockerSandbox:
         name: Optional[str] = None,
         workdir: str = CONTAINER_WORKDIR,
         env: Optional[dict] = None,
+        path_guard: bool = True,
     ) -> None:
         self.image = image
         self.instance_id = instance_id
@@ -147,6 +149,7 @@ class DockerSandbox:
         self.python_bin = python_bin
         self.network = network
         self.workdir = workdir
+        self.path_guard = path_guard
         self.env = {**CONTAINER_ENV, **(env or {})}
         safe = instance_id.replace("/", "_")
         self.name = name or f"agent-eval-{safe}-{uuid.uuid4().hex[:8]}"
@@ -239,20 +242,49 @@ class DockerSandbox:
         return self.exec(["bash", "-lc", full], timeout=timeout)
 
     # ---------------- 文件操作 ----------------
+    def _guarded_script(self, body: str, checks: Sequence[str]) -> str:
+        """开启守卫时把守卫源码与检查调用拼到 I/O 脚本之前。
+
+        关闭时原样返回 body, 不注入守卫、不产生额外容器调用。
+        """
+        if not self.path_guard:
+            return body
+        calls = "\n".join(checks)
+        return f"{guard_source()}\n{calls}\n{body}"
+
     def read_text(self, path: str, offset: int = 0, limit: int = 2000, timeout: int = 120) -> ExecResult:
-        return self.exec([self.python_bin, "-c", _READ_SCRIPT, path, str(offset), str(limit)], timeout=timeout)
+        script = self._guarded_script(
+            _READ_SCRIPT,
+            [f'enforce(sys.argv[1], "read", {self.workdir!r})'],
+        )
+        return self.exec([self.python_bin, "-c", script, path, str(offset), str(limit)], timeout=timeout)
 
     def write_text(self, path: str, content: str, timeout: int = 120) -> ExecResult:
-        return self.exec([self.python_bin, "-c", _WRITE_SCRIPT, path], input=content, timeout=timeout)
+        script = self._guarded_script(
+            _WRITE_SCRIPT,
+            [f'enforce(sys.argv[1], "write", {self.workdir!r})'],
+        )
+        return self.exec([self.python_bin, "-c", script, path], input=content, timeout=timeout)
 
     def edit_text(self, path: str, old: str, new: str, timeout: int = 120) -> ExecResult:
         import json
 
-        payload = json.dumps({"path": path, "old": old, "new": new})
-        return self.exec([self.python_bin, "-c", _EDIT_SCRIPT], input=payload, timeout=timeout)
+        script = self._guarded_script(
+            _EDIT_SCRIPT,
+            [f'enforce(sys.argv[1], "write", {self.workdir!r})'],
+        )
+        payload = json.dumps({"old": old, "new": new})
+        return self.exec([self.python_bin, "-c", script, path], input=payload, timeout=timeout)
 
     def glob_files(self, pattern: str, path: str = ".", timeout: int = 120) -> ExecResult:
-        return self.exec([self.python_bin, "-c", _GLOB_SCRIPT, pattern, path], timeout=timeout)
+        script = self._guarded_script(
+            _GLOB_SCRIPT,
+            [
+                f'enforce(sys.argv[2], "read", {self.workdir!r})',
+                f'enforce(os.path.join(sys.argv[2], sys.argv[1]), "read", {self.workdir!r})',
+            ],
+        )
+        return self.exec([self.python_bin, "-c", script, pattern, path], timeout=timeout)
 
     def grep(self, pattern: str, path: str = ".", glob_pat: Optional[str] = None, timeout: int = 180) -> ExecResult:
         p = shlex.quote(pattern)
@@ -263,6 +295,11 @@ class DockerSandbox:
         rg.append(t)
         grep = ["grep", "-r", "-n", "-H", "--", p, t]
         cmd = f"(command -v rg >/dev/null 2>&1 && {' '.join(rg)}) || {' '.join(grep)}"
+        if self.path_guard:
+            guard_args = ["read", self.workdir, path or "."]
+            guard_code = f"{guard_source()}\nraise SystemExit(main({guard_args!r}))\n"
+            guard_cmd = f"{shlex.quote(self.python_bin)} -c {shlex.quote(guard_code)}"
+            cmd = f"{guard_cmd} && ({cmd})"
         return self.bash(cmd, timeout=timeout)
 
     # ---------------- 补丁提取 ----------------

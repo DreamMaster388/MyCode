@@ -162,6 +162,7 @@ Bash 不进入逐次审批，因为每次执行都弹窗会失去交互价值；
 `eval/run_predictions.py` 支持在 SWE-bench 实例容器内运行 Agent，并把工具操作通过容器执行：
 
 - 默认关闭容器网络，强制 pip / HuggingFace 离线；
+- 文件工具默认在容器内做路径校验（全盘可读，仅 `/testbed`、`/tmp`、`/dev/null` 可写）；做消融实验时可用 `--no-path-guard` 关闭；
 - Agent 循环在宿主机，文件读写与命令执行进入实例容器；
 - 产出官方格式的 `predictions.jsonl`，可交给 SWE-bench 官方 harness 判分；
 - 同时输出每实例的诊断信息，便于定位“没改对”还是“没跑起来”。

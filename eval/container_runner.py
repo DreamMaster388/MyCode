@@ -161,6 +161,7 @@ def run_instance(
     pull_timeout: int = 7200,
     keep_container: bool = False,
     network: str = "none",
+    path_guard: bool = True,
 ) -> Dict[str, Any]:
     """在实例容器内运行 Agent，返回补丁与诊断。"""
     inst_id = instance["instance_id"]
@@ -170,6 +171,7 @@ def run_instance(
         instance_id=inst_id,
         activation=eval_activation_prefix(instance),
         network=network,
+        path_guard=path_guard,
     )
 
     base: Dict[str, Any] = {
@@ -185,7 +187,7 @@ def run_instance(
         "duration_seconds": 0.0,
         "final_text": "",
         "error": "",
-        "diagnostics": {},
+        "diagnostics": {"path_guard": path_guard},
     }
 
     try:
@@ -211,6 +213,7 @@ def run_instance(
             meta = agent._session_metadata
             diag = dict(agent.diagnostics)
             diag["edited_files"] = sorted(diag["edited_files"])
+            diag["path_guard"] = path_guard
             base.update(
                 {
                     "status": "ok",
