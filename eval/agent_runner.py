@@ -18,6 +18,7 @@ from agents.agent.code_agent import CodeAgent
 from agents.core.config import Config
 from agents.core.llm import HelloAgentsLLM
 from agents.core.mode import AgentMode, ModeGuard
+from agents.core.approval import DenyAllHandler
 from agents.fs import build_policy, SandboxMode
 from agents.tools.builtin import (
     BashTool,
@@ -50,14 +51,20 @@ def build_agent(workdir: str, max_steps: int = 25) -> CodeAgent:
     registry = ToolRegistry()
     policy = build_policy(SandboxMode.WORKSPACE_WRITE, workdir)
     # 守卫与工具共用同一 policy, 保证 bash/文件工具的围栏根一致。
-    guard = ModeGuard(AgentMode.BUILD, policy=policy)
+    guard = ModeGuard(AgentMode.BUILD, policy=policy,
+                      approval_handler=DenyAllHandler())
     for tool in (
-        ReadTool(project_root=workdir, policy=policy),
-        WriteTool(project_root=workdir, policy=policy),
-        EditTool(project_root=workdir, policy=policy),
+        ReadTool(project_root=workdir, policy=policy,
+                 policy_provider=guard.sandbox_policy, access_guard=guard),
+        WriteTool(project_root=workdir, policy=policy,
+                  policy_provider=guard.sandbox_policy, access_guard=guard),
+        EditTool(project_root=workdir, policy=policy,
+                 policy_provider=guard.sandbox_policy, access_guard=guard),
         BashTool(project_root=workdir, policy=policy, policy_provider=guard.sandbox_policy),
-        GrepTool(project_root=workdir),
-        GlobTool(project_root=workdir),
+        GrepTool(project_root=workdir, policy=policy,
+                 policy_provider=guard.sandbox_policy, access_guard=guard),
+        GlobTool(project_root=workdir, policy=policy,
+                 policy_provider=guard.sandbox_policy, access_guard=guard),
     ):
         registry.register_tool(tool)
 

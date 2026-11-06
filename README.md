@@ -1,299 +1,244 @@
 # MyCode
 
-基于开源框架 **HelloAgents** 二次开发的本地命令行编码助手（Coding Agent）。
-在框架的智能体、上下文工程与工具系统之上，本项目自行实现了编码智能体主循环、
-双模式安全沙箱、bash 命令审计、流式交互、CLI 命令体系与 SWE-bench 风格评测框架。
+MyCode 是一个运行在本地终端中的编码智能体（Coding Agent）。它会读取仓库、定位问题、修改文件、运行测试，并根据测试结果继续下一轮，而不是只给出一段修改建议。
 
-- 框架来源：HelloAgents（https://github.com/jjyaoao/HelloAgents）
-- 作者 / 维护者：jjyaoao（https://github.com/jjyaoao）
+项目基于开源框架 **HelloAgents** 二次开发。框架提供了 LLM 客户端、Agent 基类、上下文与工具注册等基础设施；本项目在此基础上重点补齐了四件事：
+
+- 一个可落地的多步编码智能体主循环；
+- 专用工具优先、Bash 兜底的工具体系；
+- 应用层审批 + 内核围栏的双层安全边界；
+- 可复现的 SWE-bench 风格评测闭环。
 
 ---
 
 ## 目录
 
-- [特性](#特性)
+- [核心设计](#核心设计)
+  - [1. 基础编码智能体架构](#1-基础编码智能体架构)
+  - [2. 双层安全模型](#2-双层安全模型)
+  - [3. 上下文管理体系](#3-上下文管理体系)
+  - [4. 评测系统](#4-评测系统)
 - [快速开始](#快速开始)
 - [使用方式](#使用方式)
-- [安全模型](#安全模型)
-- [框架与自研代码归属](#框架与自研代码归属)
-- [目录结构](#目录结构)
-- [评测](#评测)
+- [项目结构](#项目结构)
 - [测试](#测试)
 - [环境变量](#环境变量)
-- [开发约定](#开发约定)
-- [项目来源与致谢](#项目来源与致谢)
-- [许可证](#许可证)
+- [框架与本项目的边界](#框架与本项目的边界)
+- [来源与许可](#来源与许可)
 
 ---
 
-## 特性
+## 核心设计
 
-- **编码智能体主循环**：`CodeAgent` 基于 Function Calling，支持流式思考/正文输出、
-  工具调用与结果摘要、步数与 token 预算控制，并在预算耗尽时收敛为纯文本结论。
-- **双运行模式（硬约束）**：
-  - `plan`：只读探索代码，白名单外的一律拦截；
-  - `build`：允许写文件与执行构建命令，但仍受高危拦截与路径沙箱约束。
-- **bash 命令审计**：基于 `bashlex` 解析命令 AST，将管道、重定向、子命令、
-  控制流、命令替换等归一化为审计模型，解析失败即默认拒绝。
-- **写路径沙箱**：以 `realpath` 计算文件身份，写操作必须落在可写根之内；
-  文件工具与 bash 写重定向共用同一套策略。
-- **专用工具优先**：提供 `Read / Write / Edit / Bash / Grep / Glob`，
-  系统提示词要求优先使用专用工具、仅在必要时使用 Bash。
-- **CLI 命令体系**：以 `/` 前缀识别命令（如 `/mode plan`、`/mode build`），
-  在提交给 LLM 前拦截。
-- **可观测性**：将每轮模型输出、工具调用与结果记录到 `memory/traces/`。
-- **本地评测**：SWE-bench 风格 harness，在隔离仓库中运行 agent、提取补丁、
-  跑测试并按 FAIL_TO_PASS / PASS_TO_PASS 判定是否解决。
+### 1. 基础编码智能体架构
+
+编码任务不是一次对话，而是一个不断收敛的循环：读代码、做判断、调用工具、观察结果，再决定下一步。
+
+**主循环**
+
+`CodeAgent` 基于 Function Calling 实现多步循环：
+
+1. 把系统提示词、历史上下文和工具 Schema 发给模型；
+2. 模型返回正文与工具调用；
+3. 顺序串行执行工具，把结果写回历史；
+4. 没有新的工具调用时自然结束；否则进入下一轮。
+
+循环支持最大步数与 token 预算约束。触发上限时，会强制模型收起工具调用并输出纯文本结论，避免任务无限运行，也避免最终只留下一个半成品。
+
+**工具体系**
+
+编码智能体需要两类能力：精确的文件操作，以及执行外部命令。
+
+- 专用工具负责后者之外的大部分工作：`Read`、`Write`、`Edit`、`Grep`、`Glob`；
+- `Bash` 负责构建、测试、安装依赖和环境检查；
+- 工具通过统一注册表暴露 Schema，模型按 Function Calling 协议调用；
+- 系统提示词要求“优先专用工具、仅在必要时使用 Bash”，减少用 `cat`/`sed` 模拟文件操作带来的不可控性。
+
+工具输出还会经过统一截断：超长结果只把预览返回给模型，完整内容落盘保留。这样既不撑爆上下文，也不丢排查信息。
+
+**命令体系**
+
+终端交互层在输入进入模型之前先识别 `/` 命令：
+
+- `/mode` 切换运行模式；
+- `/allow` 查看或增删用户批准目录；
+- 未识别的输入才作为对话内容发送给模型。
+
+因此模式切换、授权目录调整这类操作不会消耗模型调用，也不会污染对话历史。
+
+```text
+用户输入
+   │
+   ├── /mode、/allow 等命令 ── 本地处理
+   │
+   └── 普通任务
+          │
+          ▼
+   LLM（流式 Function Calling）
+          │
+          ├── 无工具调用 ── 输出最终结论
+          │
+          └── 有工具调用
+                  │
+                  ▼
+          工具执行 + 结果截断
+                  │
+                  ▼
+          写回历史，进入下一轮
+```
+
+### 2. 双层安全模型
+
+编码智能体和聊天机器人最大的区别是：它会真的执行命令、真的改文件。安全边界不能只靠提示词。
+
+MyCode 把安全拆成两层：**应用层决定“能不能做”**，**内核层保证“只能做到这里”**。
+
+#### 第一层：模式、路径策略与审批
+
+三种运行模式覆盖不同的工作场景：
+
+| 模式 | 专用工具可读 | 可写 | 专用工具审批 |
+| --- | --- | --- | --- |
+| `plan` | 项目目录 + 批准目录 | 无 | 外部读需审批；写直接拒绝 |
+| `build` | 项目目录 + 批准目录 | 项目目录 + 批准目录 | 外部读/写需审批 |
+| `trusted` | 全盘 | 项目目录 + 批准目录 | 不审批；越界写直接拒绝 |
+
+- `plan` 用于只读探索和方案设计，从策略上就不可能修改文件；
+- `build` 是日常编码模式，项目目录内直接读写，项目外按需申请；
+- `trusted` 放开全盘读取，但仍限制写入范围，避免“信任模式”变成“全盘可写”。
+
+专用工具访问可读写根之外的路径时，会向用户发起审批：
+
+- `o`：仅本次放行；
+- `a`：永久批准目标所在目录；
+- `d`：拒绝。
+
+一次性批准只在当前工具调用内有效，写操作的临时文件与备份也不会借机逃逸；永久批准会立即反映到后续工具调用和 Bash 的边界中。批准目录也可以通过 `/allow` 手动管理。为保持边界清晰，永久批准只保存在当前会话内存中，不跨进程持久化。
+
+#### 第二层：Bash 的内核围栏
+
+Bash 不进入逐次审批，因为每次执行都弹窗会失去交互价值；但它始终运行在内核围栏内：
+
+- Linux 下优先使用 **Landlock**，同时限制读和写；
+- Landlock 不可用时降级到 **bwrap**，仍然提供写围栏；
+- 两者都不可用时直接拒绝执行，绝不退回无围栏运行；
+- 系统读根按“命令能启动”的最小集合收敛，不再整目录放开 `/etc`、`/proc`、`/sys`；
+- 写范围限定在项目目录、用户批准目录和必要的临时目录。
+
+内核规则在 `exec` 之后继续生效，因此 `env`、`sh -c`、`xargs`、管道和重定向都无法绕过。应用层负责策略与审批体验，内核层负责最终边界，两者职责不重叠。
+
+### 3. 上下文管理体系
+
+编码任务往往持续几十轮，上下文管理直接决定 Agent 能否稳定工作。
+
+- **历史只追加**：消息按顺序追加并分配稳定 id，不原地修改，便于回放、序列化和缓存；
+- **Token 计量**：用模型返回的真实输入 token 校准历史基线，未计量部分做增量估算；
+- **压缩**：接近上下文窗口阈值时，把较早的完整轮次压缩成摘要，保留最近若干轮原文；
+- **降级**：摘要模型不可用时退回简单摘要，不阻塞主流程；
+- **输出截断**：工具输出按行数和字节数截断，完整内容保存到独立文件；
+- **可观测性**：每轮模型输出、工具调用与结果写入 trace，便于复盘失败路径。
+
+这套机制的目标不是“塞进更多内容”，而是在有限预算内保留最有用的信息。
+
+### 4. 评测系统
+
+只看模型输出很难判断一个编码 Agent 是否真的完成了任务，因此项目提供两条评测路径。
+
+**本地 SWE 风格 harness**
+
+对每个实例：
+
+1. 建立干净的 git 仓库；
+2. 运行 Agent，让它修改代码；
+3. 提取 `git diff` 作为模型补丁；
+4. 应用 golden 测试；
+5. 运行测试并解析结果；
+6. 按 `FAIL_TO_PASS` 与 `PASS_TO_PASS` 判定是否解决。
+
+只有原有失败用例全部转绿、且原有通过用例没有回归，实例才算 `RESOLVED`。结果以 JSONL 落盘，同时保留补丁、测试结果与步数/token/耗时等指标。
+
+**真实 SWE-bench 容器执行**
+
+`eval/run_predictions.py` 支持在 SWE-bench 实例容器内运行 Agent，并把工具操作通过容器执行：
+
+- 默认关闭容器网络，强制 pip / HuggingFace 离线；
+- Agent 循环在宿主机，文件读写与命令执行进入实例容器；
+- 产出官方格式的 `predictions.jsonl`，可交给 SWE-bench 官方 harness 判分；
+- 同时输出每实例的诊断信息，便于定位“没改对”还是“没跑起来”。
 
 ---
 
 ## 快速开始
 
-要求 Python 3.10+。
+要求 Python 3.10+。安全围栏以 Linux 为目标平台；Bash 没有可用的沙箱后端时会 fail-closed，而不是无围栏执行。
 
 ```bash
 # 1. 安装依赖
 pip install -r requirements.txt
 
-# 2. 配置环境变量
+# 2. 配置模型
 cp .env.example .env
-#   编辑 .env，至少填入 LLM_API_KEY，按需修改 LLM_MODEL_ID / LLM_BASE_URL
+# 编辑 .env，至少填入 LLM_API_KEY
 
-# 3. 启动交互式编码助手
+# 3. 启动
 python main.py
 # 或
 python -m agents
 ```
 
-启动后为多轮交互式会话，输入 `exit` 或 `quit` 退出，`Ctrl+C` 中断。
+启动后进入多轮交互式会话，输入 `exit` 或 `quit` 退出，`Ctrl+C` 中断当前会话。
 
 ---
 
 ## 使用方式
 
-### 交互示例
-
-```
-(build) 你> 帮我看看 agents/core/mode.py 里 plan 模式都拦截了哪些命令
+```text
+(build) 你> 帮我看看 agents/core/mode.py 里 plan 模式的沙箱策略
 ...
 (build) 你> /mode plan
 (plan)  你> 阅读 agents/fs/policy.py 并总结写授权逻辑
 ```
 
-- 括号内为当前模式（`build` / `plan`）。
-- 思考过程以 `🧠` 前缀流式打印，正文逐字输出。
-- 每次工具调用先打印 `Executing tool: <name>`，再打印结果摘要。
+- 括号内为当前模式（`build` / `plan` / `trusted`）；
+- 思考过程与正文均以流式输出；
+- 每次工具调用会打印工具名和结果摘要。
 
-### 内置命令
+### 常用命令
 
 | 命令 | 说明 |
 | --- | --- |
-| `/mode plan` | 切换到 plan（只读）模式 |
-| `/mode build` | 切换到 build（可写）模式 |
+| `/mode plan` | 切换到只读的 plan 模式 |
+| `/mode build` | 切换到可写的 build 模式 |
+| `/mode trusted` | 切换到全盘可读、写仍受限的 trusted 模式 |
+| `/allow` | 查看当前读/写批准目录 |
+| `/allow read <path>` | 添加可读批准目录 |
+| `/allow write <path>` | 添加可写批准目录 |
+| `/allow remove read\|write <path>` | 移除批准目录 |
 | `exit` / `quit` | 退出 |
-| `Ctrl+C` | 中断当前会话 |
 
-命令在提交给 LLM 之前被 `CommandRegistry` 拦截，未识别为命令的输入才作为对话内容。
-
----
-
-## 安全模型
-
-核心原则：**默认拒绝**。
-
-### 1. 执行入口守卫 `ModeGuard`
-
-所有工具调用在执行前必须经过 `agents/core/mode.py` 的 `ModeGuard.check_tool()`：
-返回 `None` 放行，返回字符串表示拦截原因（作为错误反馈给模型）。
-
-- **plan 模式**
-  - 非 bash 工具：仅放行只读白名单（`Read / LS / Glob / Grep / Skill`，
-    含对应 `*Tool` 变体）内的工具。
-  - bash：整棵命令树必须“全只读”才放行；控制流（`if/for/while`）直接拒绝；
-    写重定向与提权/下载/安装等风险标记均拒绝；对 `$()` 与子 shell 递归审查，
-    防止 `ls $(rm -rf /)` 这类“外层只读、内层破坏”的绕过。
-  - 解释器（`python/node/bash/...`）即使命令名看似无害也一律拒绝。
-- **build 模式**
-  - 工具：写工具对每个路径参数做写路径沙箱校验。
-  - bash：拦截高危命令（提权 `privilege`、破坏性 `footgun`、任意下载 `download`），
-    允许依赖安装（`pkg_install`），并对写重定向目标做路径沙箱校验；
-    此外 bash 统一在**内核写围栏**内执行（见第 4 节）。
-
-### 2. 命令审计 `CommandAudit`
-
-`agents/core/command_audit.py` 使用 `bashlex` 把命令解析为归一化模型：
-
-- `Segment`：单条命令（命令名、参数、重定向、风险标记）；
-- `Redirection`：重定向操作符与目标，区分读/写；
-- `nested_commands`：`$()` / 子 shell 中的子命令，递归审计；
-- `has_control_flow` / `has_pipeline` / `has_subshell` 等整体标志；
-- 风险标记：`privilege`（sudo/su/doas）、`download`（curl/wget）、
-  `footgun`（rm/dd/mkfs/shred、git 破坏性子命令）、`pkg_install`（pip/npm/make/...）。
-
-任何解析失败都返回非空 `parse_error`，由规则层默认拒绝。
-
-### 3. 文件系统沙箱与策略
-
-- `agents/fs/target.py`：路径解析 seam。`resolve_path()` 把路径解析为稳定身份
-  `FsTarget`（`target_key` 用 `os.path.realpath`），`is_within()` 按身份判断父子关系。
-- `agents/fs/policy.py`：
-  - `SandboxMode`：`read-only` / `workspace-write` / `danger-full-access`；
-  - `SandboxPolicy`：工作区根 + 额外可写根；
-  - `authorize_write()`：放行返回 `None`，拒绝抛 `SandboxDenied`。
-- 文件工具与 bash 写重定向共用同一 policy。
-
-工具通过基类能力元数据 `is_write_tool` 与 `path_params`
-（`agents/tools/base.py`）声明自身是否为写工具、哪些参数是路径。
-
-### 4. 内核写围栏 `agents/sandbox/`
-
-`ModeGuard` 是执行前的策略闸门；`agents/sandbox/` 则是**内核级硬边界**：
-bash 命令被包装后执行，写入位置由内核保证，与命令字符串如何书写无关。
-
-- 后端：`LandlockBackend`（ctypes 启动器 `landlock_exec.py`，Linux 基线）与
-  `BwrapBackend`（挂载 / PID 命名空间，可选）；`SandboxProvider` 默认按
-  `bwrap -> landlock` 选首个可用后端，**全部不可用则 fail-closed 拒绝执行**。
-- 模式映射：`plan -> read-only`（无写根，改不了任何文件，这是 plan 的真正保证）；
-  `build -> workspace-write`（仅工作区 + 额外可写根 + 系统临时目录可写，`/dev/null`
-  放行）；`danger-full-access` 不包装。
-- 只处理**写**相关权限（write / remove / make / refer / truncate），读与执行不受
-  影响，因此无需为整个文件系统构造读规则。
-- Landlock 规则对子进程继续生效，天然覆盖 `env` / `xargs` / `sh -c` / `$(...)` /
-  重定向等所有派生写法（例如 `env rm -rf /` 也会被内核拒绝）。
-- 拒绝识别：非零退出且 stderr 命中方言（`permission denied` 等）时，返回
-  `[sandbox: file access denied under <mode> mode]`，提示模型这是策略拒绝、不要换
-  写法绕过。为稳定匹配，沙箱子进程强制 `LC_ALL=C`。
-- Scripts 采用 `close_fds=True` 执行，避免父进程已打开的可写 fd 被继承而绕过围栏。
-
-**范围与已知边界**：只保证 **FS 写**，且只覆盖被包装的 **bash 子进程**；
-Python 文件工具仍走应用层围栏；**读、网络、资源耗尽**不在本期范围。
+命令在提交给模型之前处理，未识别为命令的输入才进入对话。
 
 ---
 
-## 框架与自研代码归属
+## 项目结构
 
-首次框架提交为 `40d5ba6 "引入框架"`，从开源 **HelloAgents** 整体引入框架代码；
-此后新增与修改的代码均为本项目自行开发。下表中的“框架原生”指该提交引入、“自研”
-指该提交之后新增或改造。
-
-### 一、框架原生（`40d5ba6` 引入）
-
-| 模块 | 内容 |
-| --- | --- |
-| `agents/core/` | `agent.py`、`config.py`、`exceptions.py`、`lifecycle.py`、`llm.py`、`llm_adapters.py`、`llm_error.py`、`llm_response.py`、`message.py`、`session_store.py`、`streaming.py` |
-| `agents/agent/` | `simple_agent.py`、`react_agent.py`、`reflection_agent.py`、`plan_solve_agent.py` |
-| `agents/context/` | `builder.py`、`history.py`、`truncator.py` |
-| `agents/observability/` | `trace_logger.py` |
-| `agents/skill/` | `loader.py` |
-| `agents/tools/` | `base.py`、`registry.py`、`response.py`、`errors.py`、`circuit_breaker.py`、`tool_filter.py` |
-| `agents/tools/builtin/` | `calculator.py`、`devlog_tool.py`、`file_tools.py`、`skill_tool.py`、`task_tool.py`、`todowrite_tool.py` |
-| 其他 | `agents/__init__.py`、`agents/__main__.py`、`main.py`（骨架）、`.env.example`、`requirements.txt` 基础依赖 |
-
-### 二、自行开发（框架引入后新增）
-
-| 模块 | 说明 |
-| --- | --- |
-| `agents/agent/code_agent.py` | 编码智能体主循环，流式 `stream_run`，工具执行/输出截断/步数与 token 预算/收尾兜底 |
-| `agents/core/mode.py` | `AgentMode`（build/plan）与执行入口守卫 `ModeGuard` 及规则函数 |
-| `agents/core/command_audit.py` | 基于 `bashlex` 的 bash 命令审计核心 |
-| `agents/fs/target.py` | 路径解析与身份判定 seam（`FsTarget`/`resolve_path`/`is_within`） |
-| `agents/fs/policy.py` | 沙箱模式、策略与写授权判定（`SandboxPolicy`/`authorize_write`） |
-| `agents/fs/__init__.py` | 文件系统子包导出 |
-| `agents/sandbox/` | 内核写围栏：`SandboxProvider` + `LandlockBackend`/`BwrapBackend` + `landlock_exec.py` 启动器 |
-| `agents/cli/base.py` | CLI 命令抽象基类 `Command` |
-| `agents/cli/registry.py` | 命令注册表 `CommandRegistry`，`/` 前缀识别 |
-| `agents/cli/builtin/mode_command.py` | `/mode` 命令实现 |
-| `agents/tools/builtin/bash_tool.py` | Bash 执行工具（绑定工作目录与 policy） |
-| `agents/tools/builtin/grep_tool.py` | Grep 内容搜索工具 |
-| `agents/tools/builtin/glob_tool.py` | Glob 文件查找工具 |
-| `eval/` | SWE-bench 风格评测框架 |
-| `test/` | 单元测试（命令审计、沙箱策略等） |
-
-### 三、在框架文件上的自研改动
-
-| 文件 | 改动内容 |
-| --- | --- |
-| `agents/core/agent.py` | 接入 `ModeGuard`，工具执行前统一鉴权 |
-| `agents/core/llm.py` | 新增带工具调用的流式接口 `stream_invoke_with_tools` |
-| `agents/core/llm_response.py` | 新增流式 chunk 类型与 `ToolCall` 结构 |
-| `agents/core/llm_adapters.py` | 适配流式工具调用 |
-| `agents/tools/base.py` | 新增能力元数据 `is_write_tool` / `path_params`，新增 `brief()` 结果摘要 |
-| `agents/tools/builtin/file_tools.py` | `Read/Write/Edit` 接入路径 policy 与沙箱鉴权 |
-| `agents/tools/builtin/__init__.py` | 导出新增工具 |
-| `main.py` | 改为消费 `stream_run` 的流式交互入口，注册命令与守卫 |
-| `requirements.txt` | 新增 `bashlex` 依赖 |
-
----
-
-## 目录结构
-
-```
+```text
 MyCode/
-├── main.py                     # 交互式入口
-├── requirements.txt
-├── .env.example                # 环境变量示例
+├── main.py                 # 交互式入口：流式输出、命令注册
 ├── agents/
-│   ├── agent/                  # 智能体：simple/react/reflection/plan_solve（框架）、code_agent（自研）
-│   ├── cli/                    # 自研：CLI 命令体系
-│   ├── context/                # 上下文构建/历史（含 token 计量）/截断（框架）
-│   ├── core/                   # LLM、Agent 基类、流式、配置（框架）+ mode/command_audit（自研）
-│   ├── fs/                     # 自研：路径解析与沙箱策略
-│   ├── sandbox/                # 自研：内核写围栏后端（Landlock/bwrap）
-│   ├── observability/          # trace 日志（框架）
-│   ├── skill/                  # 技能加载（框架）
-│   └── tools/                  # 工具基类/注册表（框架）+ Bash/Grep/Glob（自研）
-├── eval/                       # 自研：SWE-bench 风格评测
-│   ├── instances/              # 评测用例（含合成仓库）
-│   ├── results/                # 结果输出
-│   ├── harness.py              # 单实例编排
-│   ├── agent_runner.py         # 运行 CodeAgent
-│   ├── judge.py                # 测试结果解析与判定
-│   └── run_eval.py             # 批量运行 CLI
-├── test/                       # 自研：pytest 单测
-│   ├── core/test_command_audit.py
-│   ├── core/test_mode.py
-│   ├── fs/test_policy.py
-│   └── sandbox/                # 内核写围栏测试
-├── memory/traces/              # 运行期 trace 产物
-├── log/                        # 日志
-└── tool-output/                # 工具完整输出（超长时）
+│   ├── agent/              # CodeAgent 主循环与框架内置 Agent
+│   ├── tools/              # 工具注册、专用工具、Bash、路径授权
+│   ├── fs/                 # 路径身份与读写策略
+│   ├── sandbox/            # Landlock / bwrap 内核围栏
+│   ├── context/            # 历史、Token 计量、摘要与截断
+│   ├── cli/                # /mode、/allow 命令体系
+│   ├── core/               # LLM 客户端、流式协议、配置、生命周期
+│   ├── observability/      # trace 记录
+│   └── skill/              # 技能加载
+├── eval/                   # 本地 harness 与 SWE-bench 容器执行
+├── test/                   # pytest 单元与集成测试
+└── requirements.txt
 ```
-
----
-
-## 评测
-
-**流程**：建隔离仓库 → 运行 agent → 提取 git diff 作为模型补丁 →
-写入 golden 测试 → 运行 pytest → 解析结果并判定。
-
-**判定规则**（`eval/judge.py`）：仅当所有 `FAIL_TO_PASS` 测试通过、且所有
-`PASS_TO_PASS` 测试未回归时，实例判定为 `RESOLVED`。
-
-```bash
-# 运行全部实例（注意用 -m，脚本内含相对导入）
-python -m eval.run_eval --instances eval/instances --out eval/results
-
-# 只跑前 1 个
-python -m eval.run_eval --instances eval/instances --out eval/results --limit 1
-
-# 指定 agent 最大步数
-python -m eval.run_eval --max-steps 25
-```
-
-**实例配置字段**（`eval/instances/*.json`）：
-
-| 字段 | 说明 |
-| --- | --- |
-| `instance_id` | 实例唯一标识 |
-| `problem_statement` | 交给 agent 的问题描述 |
-| `repo_url` / `base_commit` | 远程仓库地址与基线提交（可选） |
-| `repo_dir` | 本地合成仓库相对路径（无 `repo_url` 时使用） |
-| `test_patch` / `test_files` | golden 测试补丁或测试文件内容 |
-| `test_cmd` | 运行测试的命令 |
-| `fail_to_pass` | 修复后必须通过的测试 |
-| `pass_to_pass` | 修复后不得回归的测试 |
-
-结果写入 `eval/results/results.jsonl`，模型补丁保存于 `eval/results/patches/`。
 
 ---
 
@@ -303,66 +248,101 @@ python -m eval.run_eval --max-steps 25
 python -m pytest test/
 ```
 
-当前包含：
+当前测试覆盖：
 
-- `test/core/test_command_audit.py`：命令审计、风险标记、写重定向判定；
-- `test/core/test_mode.py`：plan / build 模式判定与规则函数；
-- `test/context/test_history.py`：HistoryManager 的 id 分配、轮次统计、摘要快照、上下文构建、压缩判断与摘要生成；
-- `test/fs/test_policy.py`：沙箱策略与可写根；
-- `test/sandbox/`：Landlock 启动器、后端选择与 bash 内核围栏集成。
+- 模式切换、策略判定与审批决策；
+- 文件工具的读写鉴权与一次性/永久批准；
+- Landlock 启动器、读写围栏、后端选择；
+- Bash 在围栏内的执行与拒绝识别；
+- CLI 命令、历史管理与补丁提取。
+
+沙箱相关集成用例需要 Linux Landlock 支持。
 
 ---
 
 ## 环境变量
 
-复制 `.env.example` 为 `.env` 后按需填写。
+复制 `.env.example` 为 `.env` 后填写：
 
 | 变量 | 必填 | 说明 |
 | --- | --- | --- |
 | `LLM_MODEL_ID` | 是 | 模型 ID，如 `deepseek-chat` |
-| `LLM_API_KEY` | 是 | API Key |
+| `LLM_API_KEY` | 是 | 模型 API Key |
 | `LLM_BASE_URL` | 是 | 兼容 OpenAI 格式的服务地址 |
 | `LLM_TIMEOUT` | 否 | 请求超时（秒），默认 60 |
-| `SERPAPI_API_KEY` | 否 | 联网搜索（预留） |
-| `QDRANT_*` | 否 | 向量数据库（记忆/RAG，预留） |
-| `EMBED_*` | 否 | Embedding 模型（预留） |
-| `GITHUB_PERSONAL_ACCESS_TOKEN` / `HF_TOKEN` | 否 | 预留 |
 
-兼容所有 OpenAI 格式接口（DeepSeek / Qwen / Kimi / 智谱 / Ollama 等）。
+兼容 DeepSeek、Qwen、Kimi、智谱、Ollama 等 OpenAI 格式接口。
 
 ---
 
-## 开发约定
+## 框架与本项目的边界
 
-- 提交信息采用 `<type>: <描述>` 前缀，已有类型：`feat`、`fix`、`test`、`refactor`。
-- 修改框架文件时应在提交信息中说明动因（如“接入 ModeGuard”“接入 seam”），
-  保持框架改动与自研代码可追溯。
-- 安全相关改动遵循默认拒绝原则：无法解析、无法判断的情况一律拦截而非放行。
+本项目以 `40d5ba6 "引入框架"` 为分界：该提交带入的代码属于 HelloAgents 原生能力；此后新增的代码，以及对框架文件的修改，均为本项目自研。
+
+### 框架原生
+
+| 模块 | 内容 |
+| --- | --- |
+| `agents/agent/` | `SimpleAgent`、`ReActAgent`、`ReflectionAgent`、`PlanSolveAgent` 四种 Agent 实现 |
+| `agents/context/` | `truncator.py` 工具输出截断的初始实现 |
+| `agents/core/` | `exceptions.py`、`lifecycle.py`、`llm_error.py`、`session_store.py`、`streaming.py` 等基础协议与运行时 |
+| `agents/observability/` | `trace_logger.py`，JSONL / HTML trace 记录 |
+| `agents/skill/` | `loader.py`，技能加载与渐进式披露 |
+| `agents/tools/` | `circuit_breaker.py`、`errors.py`、`response.py` 等工具基础设施 |
+| `agents/tools/builtin/` | `calculator.py`、`devlog_tool.py`、`skill_tool.py`、`task_tool.py`、`todowrite_tool.py` 等通用工具 |
+| 工程基础 | `.env.example`、原始依赖声明等 |
+
+### 本项目完全自研
+
+| 模块 | 内容 |
+| --- | --- |
+| `agents/agent/code_agent.py` | 编码智能体主循环：Function Calling、流式事件、工具执行与截断、步数与 Token 预算、上下文压缩、收尾兜底 |
+| `agents/core/mode.py` | `AgentMode`（plan / build / trusted）与 `ModeGuard`：模式到策略的映射、批准目录、审批入口 |
+| `agents/core/approval.py` | 审批请求与决策模型、控制台审批器、无交互默认拒绝 |
+| `agents/fs/` | 路径身份解析、读写策略、可读/可写根、`read_all` |
+| `agents/sandbox/` | Landlock / bwrap 后端、Landlock 启动器、后端选择与通用 `argv` 包装 |
+| `agents/cli/` | `/mode`、`/allow` 命令体系与命令行解析 |
+| `agents/tools/builtin/` 新增 | `bash_tool.py`、`grep_tool.py`、`glob_tool.py`、`fs_access.py` |
+| `eval/` | SWE-bench 风格 harness、Docker 实例沙箱、容器版工具、预测生成、补丁提取与判定 |
+| `test/` | 模式、策略、审批、工具、沙箱、CLI、上下文与评测相关测试 |
+| 文档 | `README.md` |
+
+### 在框架文件上的改造
+
+| 文件 | 改动内容 |
+| --- | --- |
+| `agents/core/agent.py` | 接入 `ModeGuard`；`HistoryManager` 接入窗口/摘要配置；移除旧的 Token 计数与压缩逻辑 |
+| `agents/core/config.py` | 增加摘要 LLM 的 API Key / Base URL 配置，智能摘要默认开启 |
+| `agents/core/message.py` | 增加历史 id、`tool_call_id`、`tool_calls`、摘要 `replace` 区间，以及 LLM 字典互转 |
+| `agents/context/history.py` | 重构为只追加历史 + Token 校准/增量估算 + 快照 + 摘要压缩 |
+| `agents/context/token_counter.py` | 删除；Token 计量职责合并进 `HistoryManager` |
+| `agents/core/llm.py` | 新增带工具调用的流式接口 |
+| `agents/core/llm_adapters.py` | OpenAI 适配器支持流式工具调用、思考过程与用量统计 |
+| `agents/core/llm_response.py` | 新增流式 chunk 类型、工具调用结构、`reasoning_content` |
+| `agents/tools/base.py` | 新增 `access_kind` / `path_params` 能力元数据与 `brief()` 结果摘要 |
+| `agents/tools/registry.py` | 工具名大小写不敏感索引、查找、注销与熔断器键归一 |
+| `agents/tools/tool_filter.py` | 只读/全量/自定义过滤器改为大小写不敏感 |
+| `agents/tools/builtin/__init__.py` | 导出 `BashTool`、`GrepTool`、`GlobTool` |
+| `agents/tools/builtin/file_tools.py` | Read/Write/Edit/MultiEdit 接入路径身份、读写鉴权、审批与派生路径二次围栏 |
+| `main.py` | 从 `SimpleAgent` 改为 `CodeAgent` 流式入口；注册命令、模式守卫与工具策略 |
+| `requirements.txt` | 调整依赖下限，移除 `tiktoken`，补充 `PyYAML`，测试/评测依赖标注为可选 |
+| `.gitignore` | 增加运行日志、评测产物、`.opencode/`、临时文件等忽略项 |
 
 ---
 
-## 项目来源与致谢
+## 来源与许可
 
-本项目的框架底座为开源项目 **HelloAgents**，特此致谢。
+### 框架来源
 
-- 项目地址：https://github.com/jjyaoao/HelloAgents
-- 作者 / 维护者：jjyaoao
-- 镜像仓库：https://atomgit.com/jjyaoao/HelloAgents
-- 关联教程：Hello-Agents（https://github.com/datawhalechina/hello-agents）
+本项目以开源项目 **HelloAgents** 为底座，框架与本项目的具体边界见上一节。
+
+- HelloAgents：https://github.com/jjyaoao/HelloAgents
 - 引入提交：`40d5ba6 "引入框架"`
 
----
+### 许可证
 
-## 许可证
+本项目是 HelloAgents 的衍生作品，遵循 **CC BY-NC-SA 4.0**（署名—非商业性使用—相同方式共享 4.0 国际）许可证，完整条款见仓库根目录 [LICENSE](LICENSE)。
 
-本项目是 HelloAgents 的衍生作品，遵循其 **CC BY-NC-SA 4.0**
-（署名—非商业性使用—相同方式共享 4.0 国际）许可证，完整条款见
-仓库根目录 [LICENSE](LICENSE)。
-
-- 框架原始许可证：https://github.com/jjyaoao/HelloAgents/blob/main/LICENSE
-- 许可证要点：
-  - 署名（Attribution）：需注明原作者；
-  - 相同方式共享（ShareAlike）：修改后的作品须使用相同许可证；
-  - 非商业性使用（NonCommercial）：不得用于商业目的。
-- 本项目新增代码同样采用 CC BY-NC-SA 4.0 发布。
-- 如需商业使用，请联系原作者获取授权。
+- 需注明原作者；
+- 修改后的作品须使用相同许可证；
+- 不得用于商业目的；商业使用请联系原作者获取授权。

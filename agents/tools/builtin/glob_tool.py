@@ -3,20 +3,27 @@ from typing import Dict, Any, List, Optional, TYPE_CHECKING
 from ..base import Tool, ToolParameter
 from ..response import ToolResponse
 from ..errors import ToolErrorCode
+from .fs_access import _FsTool, _permit_scoped
 
 if TYPE_CHECKING:
     from ..registry import ToolRegistry
 
 
-class GlobTool(Tool):
-    path_params = ("path",)  
+class GlobTool(Tool, _FsTool):
+    access_kind = "read"
+    path_params = ("path",)
+
     def __init__(self, 
                  project_root: str = ".",
-                 registry: Optional['ToolRegistry'] = None):
+                 registry: Optional['ToolRegistry'] = None,
+                 working_dir: Optional[str] = None,
+                 policy=None,
+                 policy_provider=None,
+                 access_guard=None):
         super().__init__(name="Glob", 
                          description="Search for files matching a pattern in the working directory and return the names of the files found.", 
                          expandable=False)
-        self.project_root = project_root
+        self._init_fs(project_root, working_dir, policy, policy_provider, access_guard)
         self.registry = registry
 
     def get_parameters(self) -> List[ToolParameter]:
@@ -31,12 +38,19 @@ class GlobTool(Tool):
                               required=False),
             ]
 
+    @_permit_scoped
     def run(self, parameters: Dict[str, Any]) -> ToolResponse:
         pattern = parameters.get("pattern")
         
         if not pattern:
             return ToolResponse.error(code=ToolErrorCode.INVALID_PARAM, 
                                         message="Missing required parameters: 'pattern'.")
+
+        # 读路径先过策略: 可读根之外直接拒绝, 不启动 rg。
+        target_path = parameters.get("path") or "."
+        _, err = self._prepare_read(target_path)
+        if err:
+            return err
 
         import subprocess
         import os
@@ -48,7 +62,6 @@ class GlobTool(Tool):
         ]
 
         # 设置目标路径
-        target_path = parameters.get("path", ".")
         cmd.append(target_path)
 
         try:
@@ -59,7 +72,7 @@ class GlobTool(Tool):
                                     text=True,
                                     timeout=30,       # 必须设置超时，防止搜索大型 node_modules 卡死
                                     env=os.environ,   # 继承环境变量以便找到 rg 二进制
-                                    cwd=self.project_root  # 在项目根目录下执行
+                                    cwd=str(self.working_dir)  # 相对路径按 working_dir 解析
                                    )
             # ripgrep 退出码：0=有匹配，1=无匹配，>1=错误
             if result.returncode == 0:

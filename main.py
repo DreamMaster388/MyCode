@@ -19,8 +19,9 @@ from agents.core.streaming import StreamEventType
 from agents.tools.registry import ToolRegistry
 from agents.tools.builtin import ReadTool, WriteTool, EditTool, BashTool, GrepTool, GlobTool
 from agents.core.mode import AgentMode, ModeGuard
+from agents.core.approval import ConsoleApprovalHandler
 from agents.cli.registry import CommandRegistry
-from agents.cli.builtin import ModeCommand
+from agents.cli.builtin import AllowCommand, ModeCommand
 
 
 
@@ -44,14 +45,20 @@ def build_agent() -> CodeAgent:
     llm = HelloAgentsLLM()
     registry = ToolRegistry()
     policy = build_policy(SandboxMode.WORKSPACE_WRITE, ".")
-    guard = ModeGuard(AgentMode.BUILD, policy=policy)
+    guard = ModeGuard(AgentMode.BUILD, policy=policy,
+                      approval_handler=ConsoleApprovalHandler())
     for tool in (
-        ReadTool(policy=policy),
-        WriteTool(policy=policy),
-        EditTool(policy=policy),
+        ReadTool(policy=policy, policy_provider=guard.sandbox_policy,
+                 access_guard=guard),
+        WriteTool(policy=policy, policy_provider=guard.sandbox_policy,
+                  access_guard=guard),
+        EditTool(policy=policy, policy_provider=guard.sandbox_policy,
+                 access_guard=guard),
         BashTool(policy=policy, policy_provider=guard.sandbox_policy),
-        GrepTool(),
-        GlobTool()
+        GrepTool(policy=policy, policy_provider=guard.sandbox_policy,
+                 access_guard=guard),
+        GlobTool(policy=policy, policy_provider=guard.sandbox_policy,
+                 access_guard=guard)
     ):
         registry.register_tool(tool)
 
@@ -78,7 +85,11 @@ def main() -> None:
     agent = build_agent()
     command_register = CommandRegistry()
     command_register.register(ModeCommand())
-    print("=== 编码助手已启动（输入 exit / quit 退出，Ctrl+C 中断）===")
+    command_register.register(AllowCommand())
+    print(
+        "=== 编码助手已启动（模式: /mode plan|build|trusted；"
+        "批准目录: /allow；exit / quit 退出，Ctrl+C 中断）==="
+    )
     try:
         while True:
             try:
@@ -90,7 +101,7 @@ def main() -> None:
                 continue
             if text.lower() in ("exit", "quit"):
                 break
-            if command_register.check_command(text.lower(), agent.mode_guard):
+            if command_register.check_command(text, agent.mode_guard):
                 continue
             try:
                 for event in agent.stream_run(text):

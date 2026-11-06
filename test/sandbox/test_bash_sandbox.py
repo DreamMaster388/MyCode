@@ -75,3 +75,19 @@ def test_danger_full_access_runs_unconfined(home_sandbox):
     resp = tool.run({"command": f"echo hi > {outside}"})
     assert resp.status is ToolStatus.SUCCESS
     assert os.path.exists(outside)
+
+
+def test_trusted_reads_all_but_still_restricts_writes(home_sandbox):
+    policy, ws, outside = home_sandbox
+    with open(outside, "w", encoding="utf-8") as fh:
+        fh.write("secret")
+    guard = ModeGuard(AgentMode.TRUSTED, policy=policy)
+    tool = BashTool(policy=policy, policy_provider=guard.sandbox_policy)
+
+    read_resp = tool.run({"command": f"cat {outside}"})
+    assert read_resp.status is ToolStatus.SUCCESS, read_resp.text
+    assert "secret" in read_resp.text
+
+    write_resp = tool.run({"command": f"echo hi > {outside}.new"})
+    assert write_resp.status is ToolStatus.ERROR
+    assert not os.path.exists(outside + ".new")

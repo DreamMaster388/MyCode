@@ -2,7 +2,6 @@
 pydantic>=2.13
 openai>=2.36
 python-dotenv>=1.2
-bashlex>=0.18
 PyYAML>=6.0
 
 # ── 测试 / 评测（可选，不安装不影响主程序）──

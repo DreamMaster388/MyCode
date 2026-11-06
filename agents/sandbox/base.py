@@ -1,16 +1,17 @@
 """沙箱后端抽象。
 
-这一层只回答"如何把一条 bash 命令关进内核围栏", 不做策略判定(策略在
-`agents/fs/policy.py`)。BashTool 通过 `SandboxProvider` 拿到具体后端,
-把命令包装成受限 argv 后交给 `subprocess` 执行。
+这一层只回答"如何把任意 argv 关进内核围栏", 不做策略判定(策略在
+`agents/fs/policy.py`)。调用方通过 `SandboxProvider` 拿到具体后端, 把任意
+argv 包装成受限 argv 后交给 `subprocess` 执行。
 
 """
 from __future__ import annotations
 
 import os
+import sys
 import tempfile
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Protocol, Sequence, runtime_checkable
 
 if TYPE_CHECKING:
     from ..fs import SandboxPolicy
@@ -19,7 +20,7 @@ if TYPE_CHECKING:
 class SandboxUnavailableError(RuntimeError):
     """没有任何可用后端(或用户强制的后端不可用)。
 
-    调用方必须 fail-closed: 拒绝执行 bash, 而不是退回无围栏执行。
+    调用方必须 fail-closed: 拒绝执行外部命令, 而不是退回无围栏执行。
     """
 
     def __init__(self, message: str) -> None:
@@ -69,8 +70,8 @@ class SandboxBackend(Protocol):
         """本机是否可用(探测一次, 实现内部应缓存)。"""
         ...
 
-    def confine(self, command: str, policy: "SandboxPolicy") -> ConfinedCommand:
-        """把命令包装成受限命令。不可用时应抛 SandboxUnavailableError。"""
+    def confine(self, argv: Sequence[str], policy: "SandboxPolicy") -> ConfinedCommand:
+        """把任意 argv 包装成受限命令。不可用时应抛 SandboxUnavailableError。"""
         ...
 
 
@@ -92,6 +93,81 @@ def write_roots(policy: "SandboxPolicy") -> list[str]:
     for raw in candidates:
         real = os.path.realpath(raw)
         if real in seen or not os.path.isdir(real):
+            continue
+        seen.add(real)
+        roots.append(real)
+    return roots
+
+
+# 系统命令运行所需的最小可读根。
+# 除固定系统目录外, 还需包含当前解释器前缀(conda/venv): 否则围栏内
+# `python -c pass` 连标准库都读不到。逐项用途见下面的列表。
+def _interpreter_read_roots() -> tuple[str, ...]:
+    """当前解释器/工具链的读根(随运行环境变化, 只保留真实存在的目录)。"""
+    candidates = (
+        getattr(sys, "base_prefix", ""),
+        getattr(sys, "prefix", ""),
+        os.path.dirname(os.path.realpath(sys.executable)),
+    )
+    roots: list[str] = []
+    for raw in candidates:
+        if not raw or raw in roots:
+            continue
+        if os.path.isdir(os.path.realpath(raw)):
+            roots.append(raw)
+    return tuple(roots)
+
+
+SYSTEM_READ_ROOTS: tuple[str, ...] = (
+    # 二进制、共享库、zoneinfo、/usr/lib/ssl 等默认数据目录。
+    "/usr",
+    # 非合并 /usr 的系统上这些是独立目录; 合并 /usr 时 realpath 会去重。
+    "/bin",
+    "/sbin",
+    "/lib",
+    "/lib64",
+    # 设备节点: git 会打开 /dev/null, 其它命令可能用 /dev/urandom 等。
+    "/dev",
+    # SSL CA 证书。
+    "/etc/ssl",
+    # 动态链接缓存、系统时区(部分发行版 /etc/localtime 是普通文件)。
+    "/etc/ld.so.cache",
+    "/etc/localtime",
+    # 用户/组解析; 只放行必要文件, 不放行整个 /etc。
+    "/etc/passwd",
+    "/etc/group",
+    "/etc/nsswitch.conf",
+    # 主机名与 DNS 解析文件(网络限制不在本期, 这里只保证命令可读)。
+    "/etc/hosts",
+    "/etc/resolv.conf",
+    # 系统级 git 配置(不存在时由 read_roots 过滤掉)。
+    "/etc/gitconfig",
+) + _interpreter_read_roots()
+
+
+def read_roots(policy: "SandboxPolicy") -> list[str]:
+    """一次执行允许读取的根(系统最小集 + 策略可读根)。
+
+    - read_all(trusted) 直接返回 ["/"]: 全盘可读, 写仍由 write_roots 限制;
+    - 可读根 = SYSTEM_READ_ROOTS + readable_roots(policy)(项目目录 + 用户批准根);
+    - 与 write_roots 不同, 读根可以是文件(如 /etc/passwd), 启动器对文件
+      只授予 read_file, 对目录授予 read_file + read_dir;
+    - 与 write_roots 一致: realpath 归一、去重、只保留已存在路径;
+    - danger-full-access 不包装执行, 返回空(表示不做读限制)。
+    """
+    from ..fs import SandboxMode, readable_roots
+
+    if getattr(policy, "read_all", False):
+        return ["/"]
+    if policy.mode == SandboxMode.DANGER_FULL_ACCESS:
+        return []
+    candidates = list(SYSTEM_READ_ROOTS)
+    candidates += [root.display_path for root in readable_roots(policy)]
+    seen: set[str] = set()
+    roots: list[str] = []
+    for raw in candidates:
+        real = os.path.realpath(raw)
+        if real in seen or not os.path.exists(real):
             continue
         seen.add(real)
         roots.append(real)

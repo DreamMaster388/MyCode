@@ -1,13 +1,15 @@
 #!/usr/bin/env python3
-"""Landlock 启动器: 先给自身套上内核写围栏, 再 exec 目标命令。
+"""Landlock 启动器: 先给自身套上内核读写围栏, 再 exec 目标命令。
 
 用法(由 LandlockBackend 拼接):
     python landlock_exec.py --mode workspace-write \\
-        --write-root /path/ws --write-root /tmp -- /bin/bash -c "<command>"
+        --read-root /usr --read-root /path/project \\
+        --write-root /path/ws -- /bin/bash -c "<command>"
 
 设计要点:
-- **只处理写相关权限**(write/remove/make/refer/truncate), 不处理读/执行 ->
-  无需为整个文件系统构造读规则, 读行为不受影响。
+- **同时处理读与写**: 读根授予 read_file/read_dir, 写根额外授予写相关权限
+  (write/remove/make/refer/truncate); execute 不接管, 因此二进制仍可执行。
+- 未被任何规则授予的读/写一律拒绝(Landlock 是"默认拒绝"的白名单模型)。
 - 必须在 **exec 之前** 应用, 且只作用于"子进程"(本启动器), 不会关住 agent 自身。
 - Landlock 规则对 exec 后的进程**继续生效**, 因此天然覆盖 bash 内部再派生的
   `env`/`xargs`/`sh -c`/`$(...)`/重定向等所有子命令。
@@ -57,6 +59,8 @@ _MAKE_RIGHTS = (
     "make_char", "make_dir", "make_reg", "make_sock",
     "make_fifo", "make_block", "make_sym",
 )
+# 读权限: 读文件内容 + 列目录(打开文件求 read_file, readdir 求 read_dir)。
+_READ_RIGHTS = ("read_file", "read_dir")
 
 _libc = ctypes.CDLL(None, use_errno=True)
 _libc.syscall.restype = ctypes.c_long
@@ -101,17 +105,41 @@ def _detect_abi() -> int:
     return int(res)
 
 
-def _handled_rights(abi: int) -> int:
-    """按 ABI 计算"我们要接管"的写权限集合(读/执行一律不碰)。"""
-    names = ["write_file", "remove_dir", "remove_file", *_MAKE_RIGHTS]
-    if abi >= 2:
-        names.append("refer")
-    if abi >= 3:
-        names.append("truncate")
+def _access_bits(names) -> int:
+    """把权限名集合转成位掩码。"""
     bits = 0
     for name in names:
         bits |= _ACCESS_FS[name]
     return bits
+
+
+def _handled_rights(abi: int) -> int:
+    """按 ABI 计算"我们要接管"的读/写权限集合(execute 一律不碰)。"""
+    names = [*_READ_RIGHTS, "write_file", "remove_dir", "remove_file", *_MAKE_RIGHTS]
+    if abi >= 2:
+        names.append("refer")
+    if abi >= 3:
+        names.append("truncate")
+    return _access_bits(names)
+
+
+def _rule_access(read_roots, write_roots, read_bits: int,
+                 write_bits: int) -> dict[str, int]:
+    """计算每个路径应授予的访问位: 读根只读, 写根读写; 同路径合并去重。
+
+    读根可能是文件(如 /etc/passwd): 文件只授予 read_file, 因为对文件
+    授予 read_dir 会被内核以 EINVAL 拒绝; 目录授予完整的 read 位。
+    返回 {realpath: allowed_access}; 插入顺序保留, 便于确定性测试。
+    """
+    access: dict[str, int] = {}
+    for root in read_roots:
+        real = os.path.realpath(root)
+        bits = read_bits if os.path.isdir(real) else _ACCESS_FS["read_file"]
+        access[real] = access.get(real, 0) | bits
+    for root in write_roots:
+        real = os.path.realpath(root)
+        access[real] = access.get(real, 0) | read_bits | write_bits
+    return access
 
 
 def _add_path_rule(ruleset_fd: int, path: str, allowed: int) -> bool:
@@ -134,10 +162,18 @@ def _add_path_rule(ruleset_fd: int, path: str, allowed: int) -> bool:
         os.close(fd)
 
 
-def _apply(write_roots: list[str]) -> None:
-    """给当前进程套上写围栏: 只允许 write_roots(+ /dev/null) 可写。"""
+def _apply(read_roots: list[str], write_roots: list[str]) -> None:
+    """给当前进程套上读写围栏。
+
+    - 读根: 目录授予 read_file/read_dir, 文件只授予 read_file;
+    - 写根: 额外授予 write/remove/make/refer/truncate(故写根也可读);
+    - /dev/null 额外放行 write_file(常见重定向目标);
+    - 未被授予的读/写一律由内核拒绝。
+    """
     abi = _detect_abi()
     handled = _handled_rights(abi)
+    read_bits = _access_bits(_READ_RIGHTS)
+    write_bits = handled & ~read_bits
 
     attr = _RulesetAttr(handled_access_fs=handled)
     ruleset_fd = _syscall(
@@ -147,13 +183,10 @@ def _apply(write_roots: list[str]) -> None:
         ctypes.c_uint32(0),
     )
     try:
-        seen: set[str] = set()
-        for root in write_roots:
-            real = os.path.realpath(root)
-            if real in seen:
-                continue
-            seen.add(real)
-            _add_path_rule(ruleset_fd, real, handled)
+        for real, allowed in _rule_access(
+            read_roots, write_roots, read_bits, write_bits
+        ).items():
+            _add_path_rule(ruleset_fd, real, allowed)
         # 惯例放行 /dev/null(常见重定向目标)。
         _add_path_rule(ruleset_fd, "/dev/null", _ACCESS_FS["write_file"])
 
@@ -167,7 +200,8 @@ def _apply(write_roots: list[str]) -> None:
 
 def _parse(argv: list[str]):
     mode = "workspace-write"
-    roots: list[str] = []
+    read_roots: list[str] = []
+    write_roots: list[str] = []
     probe = False
     i = 0
     command: list[str] = []
@@ -179,15 +213,18 @@ def _parse(argv: list[str]):
         if tok == "--mode":
             i += 1
             mode = argv[i]
+        elif tok == "--read-root":
+            i += 1
+            read_roots.append(argv[i])
         elif tok == "--write-root":
             i += 1
-            roots.append(argv[i])
+            write_roots.append(argv[i])
         elif tok == "--probe":
             probe = True
         else:
             raise ValueError(f"unknown argument: {tok}")
         i += 1
-    return mode, roots, probe, command
+    return mode, read_roots, write_roots, probe, command
 
 
 def _fail(message: str) -> "None":
@@ -197,17 +234,17 @@ def _fail(message: str) -> "None":
 
 def main(argv: list[str]) -> int:
     try:
-        mode, roots, probe, command = _parse(argv)
+        mode, read_roots, write_roots, probe, command = _parse(argv)
     except (ValueError, IndexError) as exc:
         _fail(f"bad arguments: {exc}")
 
     if mode == "read-only":
-        roots = []
+        write_roots = []
     elif mode not in ("workspace-write", "danger-full-access"):
         _fail(f"unknown mode: {mode}")
 
     try:
-        _apply(roots)
+        _apply(read_roots, write_roots)
     except OSError as exc:
         _fail(f"landlock unavailable: {exc}")
 

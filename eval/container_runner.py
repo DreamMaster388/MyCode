@@ -70,8 +70,6 @@ class InstrumentedCodeAgent(CodeAgent):
             "bash_calls": 0,
             "test_runs": 0,
             "unknown_tools": 0,
-            "guard_blocks": 0,
-            "guard_reasons": [],
             "tool_errors": 0,
             "edited_files": set(),
         }
@@ -94,10 +92,6 @@ class InstrumentedCodeAgent(CodeAgent):
         result = super()._execute_tool_call(tool_name, arguments)
         if "未找到工具" in result:
             diag["unknown_tools"] += 1
-        if result.startswith("🚫"):
-            diag["guard_blocks"] += 1
-            if len(diag["guard_reasons"]) < 10:
-                diag["guard_reasons"].append(result[:300])
         if result.startswith("❌"):
             diag["tool_errors"] += 1
         return result
