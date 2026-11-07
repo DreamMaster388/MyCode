@@ -93,6 +93,11 @@ class CodeAgent(Agent):
         status = "success"
         step = 0
         tokens_used = 0
+        input_tokens = 0
+        output_tokens = 0
+        cached_tokens = 0
+        cache_available = True
+        usage_rounds = 0
 
         # ------------ 运行循环 -------------
         while step < self.max_steps:
@@ -126,6 +131,13 @@ class CodeAgent(Agent):
             content = "".join(content_parts)
             reasoning_content = "".join(reasoning_parts)
             tokens_used += usage.get("total_tokens", 0) if usage else 0
+            if usage:
+                usage_rounds += 1
+                input_tokens += usage.get("input_tokens", 0) or 0
+                output_tokens += usage.get("output_tokens", 0) or 0
+                cached_tokens += usage.get("cache_hit_tokens", 0) or 0
+                if not usage.get("cache_hit_available", False):
+                    cache_available = False
 
             # 计量：模型成功返回后，用其精确输入 token 校准历史计量基线。
             # 此刻历史即本次请求回放的历史 + 当前用户输入（system 提示词不在历史中，
@@ -218,12 +230,20 @@ class CodeAgent(Agent):
         self._record_llm_message({"role": "assistant", "content": final_text})
         self._session_metadata["total_steps"] = step
         self._session_metadata["total_tokens"] = tokens_used
+        self._session_metadata["input_tokens"] = input_tokens
+        self._session_metadata["output_tokens"] = output_tokens
+        self._session_metadata["cached_tokens"] = cached_tokens
+        # 没有任何一轮带 usage（或某一轮缺缓存字段）都视为不可用，避免把"没采到"误读成"命中 0"。
+        self._session_metadata["cache_hit_available"] = bool(cache_available and usage_rounds > 0)
         self._session_metadata["duration_seconds"] = (datetime.now() - session_started).total_seconds()
 
         self._log("session_end", {
             "duration": (datetime.now() - session_started).total_seconds(),
             "total_steps": step,
             "total_tokens": tokens_used,
+            "input_tokens": input_tokens,
+            "output_tokens": output_tokens,
+            "cached_tokens": cached_tokens,
             "status": status,
         }, step=step,run=run_index)
 

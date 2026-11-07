@@ -27,6 +27,11 @@ R4 → test/core/test_llm_usage_cache.py::test_cost_formula
 R7 → test/eval/test_container_metrics.py::test_summary_matches_details
 R8 → test/eval/test_container_metrics.py::test_legacy_fields_unchanged
 
+## 变更记录
+- `_parse_usage` 额外返回 `cache_hit_available`，供「命中 0 / 字段缺失」区分（spec R3 要求标记）。
+- `run_predictions` 抽出纯函数 `summarize(results)`，`main` 只负责打印，R7 才可测。
+- `run_instance` 的 `base` 诊断预置 `cache_hit_available=False`，早退实例字段形状与成功实例一致。
+
 批准：lyd @ 2026-11-07
 
 下一步：/sdlc-build
