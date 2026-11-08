@@ -31,6 +31,7 @@ R8 → test/eval/test_container_metrics.py::test_legacy_fields_unchanged
 - `_parse_usage` 额外返回 `cache_hit_available`，供「命中 0 / 字段缺失」区分（spec R3 要求标记）。
 - `run_predictions` 抽出纯函数 `summarize(results)`，`main` 只负责打印，R7 才可测。
 - `run_instance` 的 `base` 诊断预置 `cache_hit_available=False`，早退实例字段形状与成功实例一致。
+- 评审后补计：`_conclude` 收尾与智能摘要（`history.py` 的 `last_summary_usage`）的 usage 计入 input/output/cache 与 total_tokens，维持 tokens=输入+输出；请求次数仍按 R5 只数主循环 step。新增自检 `test/core/test_code_agent_usage_selfcheck.py`。
 
 批准：lyd @ 2026-11-07
 
