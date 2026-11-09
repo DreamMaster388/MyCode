@@ -29,10 +29,12 @@ traces/
 .DS_Store
 
 log/
+logs/
 
 .opencode/
 
 # ── Eval harness artifacts ──
 eval/results/
+repo.bundle
 
 temp.py
