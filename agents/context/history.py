@@ -85,6 +85,8 @@ class HistoryManager:
         self._llm = llm
         # 摘要专用 LLM（懒加载；不可用时降级为简单摘要）
         self._summary_llm = None
+        # 最近一次摘要调用的 usage：None=未调用（或降级不走大模型），{}=调用发生但无 usage
+        self.last_summary_usage: Optional[Dict[str, Any]] = None
         # 下一个待分配的 id（从 0 开始，只增不减，保证 id 唯一且递增）
         self._next_id: int = 0
         # 大模型侧返回的真实输入 token 数（覆盖 _history[0, _history_token_count_idx)）
@@ -322,6 +324,7 @@ class HistoryManager:
         if not messages:
             return ""
 
+        self.last_summary_usage = None
         if self.config is None or not getattr(self.config, "enable_smart_compression", False):
             return self._simple_summary(messages)
 
@@ -335,6 +338,7 @@ class HistoryManager:
                 temperature=getattr(self.config, "summary_temperature", 0.3),
                 max_tokens=getattr(self.config, "summary_max_tokens", 800),
             )
+            self.last_summary_usage = response.usage or {}
             text = (response.content or "").strip()
             return text or self._simple_summary(messages)
         except Exception as e:

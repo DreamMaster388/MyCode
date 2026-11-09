@@ -93,6 +93,32 @@ class CodeAgent(Agent):
         status = "success"
         step = 0
         tokens_used = 0
+        input_tokens = 0
+        output_tokens = 0
+        cached_tokens = 0
+        cache_available = True
+        usage_rounds = 0
+
+        def _absorb(u: Optional[Dict[str, Any]]) -> None:
+            """把一次真实模型调用的 usage 计入本次 run 的总量与缓存可用性。
+
+            空 dict 表示调用发生了但供应商没回 usage：token 记 0、缓存置不可用。
+            None 表示没有发生调用（如本轮未触发摘要），直接跳过。
+            """
+            nonlocal tokens_used, input_tokens, output_tokens, cached_tokens
+            nonlocal cache_available, usage_rounds
+            if u is None:
+                return
+            if not u:
+                cache_available = False
+                return
+            usage_rounds += 1
+            tokens_used += u.get("total_tokens", 0) or 0
+            input_tokens += u.get("input_tokens", 0) or 0
+            output_tokens += u.get("output_tokens", 0) or 0
+            cached_tokens += u.get("cache_hit_tokens", 0) or 0
+            if not u.get("cache_hit_available", False):
+                cache_available = False
 
         # ------------ 运行循环 -------------
         while step < self.max_steps:
@@ -125,7 +151,7 @@ class CodeAgent(Agent):
 
             content = "".join(content_parts)
             reasoning_content = "".join(reasoning_parts)
-            tokens_used += usage.get("total_tokens", 0) if usage else 0
+            _absorb(usage)
 
             # 计量：模型成功返回后，用其精确输入 token 校准历史计量基线。
             # 此刻历史即本次请求回放的历史 + 当前用户输入（system 提示词不在历史中，
@@ -201,16 +227,19 @@ class CodeAgent(Agent):
                 )
 
             # 4.5) 摘要判断：上下文超阈值时把更早的轮次压缩为 summary 消息
-            self._summarize_if_needed(step=step, run=run_index)
+            #      摘要调用也是真实花费，usage 需一并计入（未触发时为 None）。
+            _absorb(self._summarize_if_needed(step=step, run=run_index))
 
             # 5) token 预算检查（步数上限由 while 条件处理）
             if self._budget_exhausted(step, tokens_used):
-                final_text = self._conclude(schemas, step, run_index, **kwargs)
+                final_text, conclude_usage = self._conclude(schemas, step, run_index, **kwargs)
+                _absorb(conclude_usage)
                 status = "budget"
                 break
         else:
             # while 未 break，达到最大步数
-            final_text = self._conclude(schemas, step, run_index, **kwargs)
+            final_text, conclude_usage = self._conclude(schemas, step, run_index, **kwargs)
+            _absorb(conclude_usage)
             status = "max_steps"
 
         # ------------ 运行结束 -------------
@@ -218,12 +247,20 @@ class CodeAgent(Agent):
         self._record_llm_message({"role": "assistant", "content": final_text})
         self._session_metadata["total_steps"] = step
         self._session_metadata["total_tokens"] = tokens_used
+        self._session_metadata["input_tokens"] = input_tokens
+        self._session_metadata["output_tokens"] = output_tokens
+        self._session_metadata["cached_tokens"] = cached_tokens
+        # 没有任何一轮带 usage（或某一轮缺缓存字段）都视为不可用，避免把"没采到"误读成"命中 0"。
+        self._session_metadata["cache_hit_available"] = bool(cache_available and usage_rounds > 0)
         self._session_metadata["duration_seconds"] = (datetime.now() - session_started).total_seconds()
 
         self._log("session_end", {
             "duration": (datetime.now() - session_started).total_seconds(),
             "total_steps": step,
             "total_tokens": tokens_used,
+            "input_tokens": input_tokens,
+            "output_tokens": output_tokens,
+            "cached_tokens": cached_tokens,
             "status": status,
         }, step=step,run=run_index)
 
@@ -241,7 +278,7 @@ class CodeAgent(Agent):
         "不要输出任何工具调用语法（如 <tool_calls>），也不要试图继续调用工具。"
     )
 
-    def _conclude(self, schemas, step, run_index, **kwargs) -> str:
+    def _conclude(self, schemas, step, run_index, **kwargs) -> "tuple[str, Optional[Dict[str, Any]]]":
         """在预算耗尽或达到最大步数时，收敛为纯文本最终结论。
 
         三层防线：
@@ -251,6 +288,8 @@ class CodeAgent(Agent):
         3. 降级 invoke：无工具/不支持 none 时用普通调用（收尾指令仍在）。
 
         绝不返回消息列表或原始调用段，最终兜底为确定性提示。
+        返回 (文本, usage)：收尾调用是真实花费，调用方需把 usage 计入本次 run 的总量；
+        主/降级通道都失败、没有真实调用时 usage 为 None（不参与记账）。
         """
         # 上下文仍由 HistoryManager 构建，收尾指令只是本次请求的临时尾巴（不入历史）
         final_messages = self.history_manager.build_context(self.system_prompt) + [
@@ -269,7 +308,7 @@ class CodeAgent(Agent):
                     self._log("model_output", {
                         "content": text, "tool_calls": 0, "usage": resp.usage or {},
                     }, step=step + 1, run=run_index)
-                    return text
+                    return text, (resp.usage or {})
             except Exception:
                 pass
 
@@ -281,12 +320,13 @@ class CodeAgent(Agent):
                 self._log("model_output", {
                     "content": text, "tool_calls": 0, "usage": resp.usage or {},
                 }, step=step + 1, run=run_index)
-                return text
+                return text, (resp.usage or {})
         except Exception:
             pass
 
-        # 确定性兜底
-        return f"[已达到最大步数 max_steps={self.max_steps}，请告诉我是否继续。]"
+        # 确定性兜底（主/降级通道都失败，没有真实调用，不产生 usage）
+        fallback = f"[已达到最大步数 max_steps={self.max_steps}，请告诉我是否继续。]"
+        return fallback, None
 
 
     # -------------------- 工具执行与截断 --------------------
@@ -338,25 +378,33 @@ class CodeAgent(Agent):
         self.add_message(recorded)
         return recorded
 
-    def _summarize_if_needed(self, step: int, run: int) -> None:
+    def _summarize_if_needed(self, step: int, run: int) -> Optional[Dict[str, Any]]:
         """每轮末尾做一次摘要判断（超阈值时向历史追加 summary 消息）
 
         保留轮数 >= 当前轮数时，HistoryManager 按设计抛出 NotEnoughRoundsError；
         这里捕获后只告警，避免摘要问题中断主循环。
+
+        返回本次摘要 LLM 调用的 usage（已计入历史花费）；未触发摘要或摘要降级
+        （不走大模型）时返回 None，避免把"没调用"误记成"调用无 usage"；
+        调用发生但供应商没回 usage 时返回 {}，由调用方按"不可用"记账。
         """
+        self.history_manager.last_summary_usage = None
         try:
             summary = self.history_manager.add_summary()
         except NotEnoughRoundsError as e:
             print(f"⚠️ 跳过历史摘要：{e}")
             self._log("summary_skipped", {"reason": str(e)}, step=step, run=run)
-            return
+            return None
 
+        summary_usage = self.history_manager.last_summary_usage
         if summary is not None:
             self._log("summary", {
                 "summary_id": summary.id,
                 "replace": summary.replace,
                 "content_chars": len(summary.content),
+                "usage": summary_usage or {},
             }, step=step, run=run)
+        return summary_usage
 
     # -------------------- 可观测性 --------------------
     def _log(self, event: str,  payload: Dict[str, Any], step: Optional[int] = None, run: Optional[int] = None) -> None:

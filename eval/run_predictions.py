@@ -45,6 +45,21 @@ def _write_jsonl(path: Path, records: list[dict]) -> None:
             fh.write(json.dumps(rec, ensure_ascii=False, default=str) + "\n")
 
 
+def summarize(results: list[dict]) -> dict:
+    """对已写出的实例记录求和取均值：汇总与 diagnostics 明细同源，避免口径分叉。"""
+    denom = max(len(results), 1)
+    totals = {
+        "input_tokens": sum(r.get("input_tokens", 0) or 0 for r in results),
+        "output_tokens": sum(r.get("output_tokens", 0) or 0 for r in results),
+        "cached_tokens": sum(r.get("cached_tokens", 0) or 0 for r in results),
+        "llm_requests": sum(r.get("llm_requests", 0) or 0 for r in results),
+        "duration_seconds": sum(r.get("duration_seconds", 0) or 0 for r in results),
+        "total_cost": sum(r.get("total_cost", 0.0) or 0.0 for r in results),
+    }
+    averages = {key: value / denom for key, value in totals.items()}
+    return {"count": len(results), "totals": totals, "averages": averages}
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Run CodeAgent inside SWE-bench instance containers.")
     parser.add_argument("--dataset", default=DEFAULT_DATASET)
@@ -114,7 +129,8 @@ def main() -> None:
                     flag = "OK" if rec.get("status") == "ok" and rec.get("patch_bytes") else "EMPTY/ERR"
                     print(f"[{done}/{len(instances)}] {rec['instance_id']} {flag} "
                           f"steps={rec.get('steps')} patch={rec.get('patch_bytes')}B "
-                          f"time={rec.get('duration_seconds')}s {rec.get('error', '')[:80]}")
+                          f"time={rec.get('duration_seconds')}s "
+                          f"cost={rec.get('total_cost', 0.0):.4f}元 {rec.get('error', '')[:80]}")
     else:
         for inst in instances:
             rec = run_instance(
@@ -130,7 +146,8 @@ def main() -> None:
             flag = "OK" if rec.get("status") == "ok" and rec.get("patch_bytes") else "EMPTY/ERR"
             print(f"[{done}/{len(instances)}] {rec['instance_id']} {flag} "
                   f"steps={rec.get('steps')} patch={rec.get('patch_bytes')}B "
-                  f"time={rec.get('duration_seconds')}s {rec.get('error', '')[:80]}")
+                  f"time={rec.get('duration_seconds')}s "
+                  f"cost={rec.get('total_cost', 0.0):.4f}元 {rec.get('error', '')[:80]}")
 
     results.sort(key=lambda r: r["instance_id"])
 
@@ -149,14 +166,21 @@ def main() -> None:
     nonempty = sum(1 for r in results if r.get("patch_bytes"))
     avg_steps = sum(r.get("steps", 0) for r in results) / max(len(results), 1)
     avg_tokens = sum(r.get("tokens", 0) for r in results) / max(len(results), 1)
-    total_time = sum(r.get("duration_seconds", 0) for r in results)
     test_runs = sum(r.get("diagnostics", {}).get("test_runs", 0) for r in results)
+    usage = summarize(results)
+    tot = usage["totals"]
+    avg = usage["averages"]
 
     print("\n===== 汇总 =====")
     print(f"predictions: {out_dir / 'predictions.jsonl'}")
     print(f"diagnostics: {out_dir / 'diagnostics.jsonl'}")
     print(f"成功: {ok}/{len(results)}  非空补丁: {nonempty}/{len(results)}")
-    print(f"平均步数: {avg_steps:.1f}  平均 tokens: {avg_tokens:.0f}  累计耗时: {total_time:.0f}s")
+    print(f"平均步数: {avg_steps:.1f}  平均 tokens: {avg_tokens:.0f}")
+    print(f"输入 tokens: {tot['input_tokens']}  输出 tokens: {tot['output_tokens']}  缓存命中: {tot['cached_tokens']}")
+    print(f"模型请求: {tot['llm_requests']}  端到端耗时: {tot['duration_seconds']:.0f}s  总费用: {tot['total_cost']:.4f} 元")
+    print(f"均值/实例: 输入 {avg['input_tokens']:.0f}  输出 {avg['output_tokens']:.0f}  "
+          f"缓存 {avg['cached_tokens']:.0f}  请求 {avg['llm_requests']:.1f}  "
+          f"耗时 {avg['duration_seconds']:.1f}s  费用 {avg['total_cost']:.4f} 元")
     print(f"tests 执行次数合计: {test_runs}")
 
 

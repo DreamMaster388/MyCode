@@ -59,6 +59,22 @@ SYSTEM_PROMPT = (
 
 _TEST_CMD_RE = re.compile(r"\b(pytest|unittest|tox|nose|py\.test)\b|manage\.py\s+test")
 
+# 计价单价（元/百万 token，写死，不做配置化）：未命中输入 2、缓存命中 0.04、输出 8。
+PRICE_INPUT_MISS_PER_M = 2.0
+PRICE_CACHE_HIT_PER_M = 0.04
+PRICE_OUTPUT_PER_M = 8.0
+
+
+def estimate_cost(input_tokens: int, output_tokens: int, cached_tokens: int) -> float:
+    """总 token 费用（元）：输入含缓存命中部分，未命中 = max(0, 输入 - 缓存)。"""
+    missed = max(0, (input_tokens or 0) - (cached_tokens or 0))
+    cost = (
+        missed * PRICE_INPUT_MISS_PER_M
+        + (cached_tokens or 0) * PRICE_CACHE_HIT_PER_M
+        + (output_tokens or 0) * PRICE_OUTPUT_PER_M
+    )
+    return cost / 1_000_000
+
 
 class InstrumentedCodeAgent(CodeAgent):
     """记录工具调用/错误/是否跑测试等诊断，供 agent 性能分析。"""
@@ -184,10 +200,15 @@ def run_instance(
         "patch_bytes": 0,
         "steps": 0,
         "tokens": 0,
+        "input_tokens": 0,
+        "output_tokens": 0,
+        "cached_tokens": 0,
+        "llm_requests": 0,
+        "total_cost": 0.0,
         "duration_seconds": 0.0,
         "final_text": "",
         "error": "",
-        "diagnostics": {"path_guard": path_guard},
+        "diagnostics": {"path_guard": path_guard, "cache_hit_available": False},
     }
 
     try:
@@ -214,6 +235,10 @@ def run_instance(
             diag = dict(agent.diagnostics)
             diag["edited_files"] = sorted(diag["edited_files"])
             diag["path_guard"] = path_guard
+            diag["cache_hit_available"] = bool(meta.get("cache_hit_available", False))
+            input_tokens = int(meta.get("input_tokens", 0) or 0)
+            output_tokens = int(meta.get("output_tokens", 0) or 0)
+            cached_tokens = int(meta.get("cached_tokens", 0) or 0)
             base.update(
                 {
                     "status": "ok",
@@ -221,6 +246,12 @@ def run_instance(
                     "patch_bytes": len(patch.encode("utf-8")),
                     "steps": meta.get("total_steps", 0),
                     "tokens": meta.get("total_tokens", 0),
+                    "input_tokens": input_tokens,
+                    "output_tokens": output_tokens,
+                    "cached_tokens": cached_tokens,
+                    # 请求次数与 total_steps 同源：stream_run 每轮 step 一次模型调用。
+                    "llm_requests": int(meta.get("total_steps", 0) or 0),
+                    "total_cost": round(estimate_cost(input_tokens, output_tokens, cached_tokens), 6),
                     "duration_seconds": round(time.time() - t0, 3),
                     "final_text": (final_text or "")[:2000],
                     "diagnostics": diag,

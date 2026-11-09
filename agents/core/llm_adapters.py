@@ -10,6 +10,46 @@ from .llm_error import LLMErrorCode
 from .llm_response import LLMResponse, StreamStats, LLMToolResponse, ToolCall, LLMStreamChunk, LLMStreamChunkType
 
 
+def _parse_usage(raw: Any) -> Dict[str, Any]:
+    """把各家 SDK 的 usage 统一成扁平字段：保留旧键，补输入/输出/缓存命中。
+
+    缓存命中优先取 DeepSeek 的 prompt_cache_hit_tokens，回退 OpenAI 兼容格式的
+    prompt_tokens_details.cached_tokens；两者都缺时记 0 并用 cache_hit_available
+    标记不可用（调用方据此区分"命中 0"与"字段缺失"）。raw 为空返回 {}。
+    """
+    if not raw:
+        return {}
+
+    def _field(obj: Any, name: str) -> Any:
+        if obj is None:
+            return None
+        if isinstance(obj, dict):
+            return obj.get(name)
+        return getattr(obj, name, None)
+
+    prompt = _field(raw, "prompt_tokens")
+    completion = _field(raw, "completion_tokens")
+    total = _field(raw, "total_tokens")
+    prompt_i = prompt if isinstance(prompt, int) else 0
+    completion_i = completion if isinstance(completion, int) else 0
+    total_i = total if isinstance(total, int) else prompt_i + completion_i
+
+    cache_hit = _field(raw, "prompt_cache_hit_tokens")
+    if not isinstance(cache_hit, int):
+        cached = _field(_field(raw, "prompt_tokens_details"), "cached_tokens")
+        cache_hit = cached if isinstance(cached, int) else None
+
+    return {
+        "prompt_tokens": prompt_i,
+        "completion_tokens": completion_i,
+        "total_tokens": total_i,
+        "input_tokens": prompt_i,
+        "output_tokens": completion_i,
+        "cache_hit_tokens": cache_hit if cache_hit is not None else 0,
+        "cache_hit_available": cache_hit is not None,
+    }
+
+
 class BaseLLMAdapter(ABC):
     """LLM适配器基类"""
 
@@ -123,13 +163,7 @@ class OpenAIAdapter(BaseLLMAdapter):
                     reasoning_content = choice.reasoning_content
 
             # 提取Usage信息
-            usage = {}
-            if hasattr(response, 'usage'):
-                usage = {
-                    'prompt_tokens': response.usage.prompt_tokens,
-                    'completion_tokens': response.usage.completion_tokens,
-                    'total_tokens': response.usage.total_tokens,
-                }
+            usage = _parse_usage(getattr(response, "usage", None))
 
             return LLMResponse(
                 content=content,
@@ -187,11 +221,7 @@ class OpenAIAdapter(BaseLLMAdapter):
 
                 # 提取usage(流式最后一个chunk可能包含)
                 if hasattr(chunk, 'usage') and chunk.usage:
-                    usage = {
-                        'prompt_tokens': chunk.usage.prompt_tokens,
-                        'completion_tokens': chunk.usage.completion_tokens,
-                        'total_tokens': chunk.usage.total_tokens,
-                    }
+                    usage = _parse_usage(chunk.usage)
 
             latency_ms = int((time.time() - start_time) * 1000)
 
@@ -240,11 +270,7 @@ class OpenAIAdapter(BaseLLMAdapter):
                     )
             usage = {}
             if response.usage:
-                usage = {
-                    "prompt_tokens": response.usage.prompt_tokens,
-                    "completion_tokens": response.usage.completion_tokens,
-                    "total_tokens": response.usage.total_tokens
-                }
+                usage = _parse_usage(response.usage)
 
             return LLMToolResponse(
                 content=message.content,
@@ -338,11 +364,7 @@ class OpenAIAdapter(BaseLLMAdapter):
                             )
                 # usage 一般在最后 chunk 携带
                 if hasattr(chunk, 'usage') and chunk.usage:
-                    usage = {
-                        "prompt_tokens": chunk.usage.prompt_tokens,
-                        "completion_tokens": chunk.usage.completion_tokens,
-                        "total_tokens": chunk.usage.total_tokens
-                    }
+                    usage = _parse_usage(chunk.usage)
 
             final_tool_calls = [
                 ToolCall(id=s["id"], name=s["name"], arguments=s["arguments"])
