@@ -70,7 +70,7 @@ SWE-bench Lite 300 实例，`DeepSeek-V4.1-Flash-1017`，禁网容器：
 - 工具通过统一注册表暴露 Schema，模型按 Function Calling 协议调用；
 - 系统提示词要求“优先专用工具、仅在必要时使用 Bash”，减少用 `cat`/`sed` 模拟文件操作带来的不可控性。
 
-工具输出还会经过统一截断：超长结果只把预览返回给模型，完整内容落盘保留。这样既不撑爆上下文，也不丢排查信息。
+工具结果全文写回历史，供模型在下一轮直接使用；不再截断或落盘，避免模型只看到预览、排查依赖额外文件。
 
 **命令体系**
 
@@ -97,7 +97,7 @@ SWE-bench Lite 300 实例，`DeepSeek-V4.1-Flash-1017`，禁网容器：
           └── 有工具调用
                   │
                   ▼
-          工具执行 + 结果截断
+          工具执行 + 结果写回
                   │
                   ▼
           写回历史，进入下一轮
@@ -145,13 +145,12 @@ Bash 不进入逐次审批，因为每次执行都弹窗会失去交互价值；
 
 ### 3. 上下文管理体系
 
-编码任务往往持续几十轮，上下文管理直接决定 Agent 能否稳定工作。
+编码任务往往持续几十轮，上下文管理直接决定 Agent 能否稳定工作。当前上下文体系由 history（原始记录与摘要）、builder（组装）和三个上下文治理模块（截断、摘要、历史召回）组成。
 
 - **历史只追加**：消息按顺序追加并分配稳定 id，不原地修改，便于回放、序列化和缓存；
-- **Token 计量**：用模型返回的真实输入 token 校准历史基线，未计量部分做增量估算；
-- **压缩**：接近上下文窗口阈值时，把较早的完整轮次压缩成摘要，保留最近若干轮原文；
-- **降级**：摘要模型不可用时退回简单摘要，不阻塞主流程；
-- **输出截断**：工具输出按行数和字节数截断，完整内容保存到独立文件；
+- **Token 计量**：builder 用模型返回的真实输入 token 校准历史基线，未计量部分做增量估算；
+- **上下文治理模块**：截断、摘要、历史召回分别由三个开关控制，默认全关；本轮三个分支为空。三开关全关时，直接发送历史并丢弃 summary 消息，不做溢出检查；
+- **全文工具输出**：工具结果不再截断、不落盘，完整文本进入历史；
 - **可观测性**：每轮模型输出、工具调用与结果写入 trace，便于复盘失败路径。
 
 这套机制的目标不是“塞进更多内容”，而是在有限预算内保留最有用的信息。
@@ -249,7 +248,7 @@ MyCode/
 │   ├── tools/              # 工具注册、专用工具、Bash、路径授权
 │   ├── fs/                 # 路径身份与读写策略
 │   ├── sandbox/            # Landlock / bwrap 内核围栏
-│   ├── context/            # 历史、Token 计量、摘要与截断
+│   ├── context/            # 历史存储、builder、截断/摘要/召回模块
 │   ├── cli/                # /mode、/allow 命令体系
 │   ├── core/               # LLM 客户端、流式协议、配置、生命周期
 │   ├── observability/      # trace 记录
@@ -303,7 +302,6 @@ python -m pytest test/
 | 模块 | 内容 |
 | --- | --- |
 | `agents/agent/` | `SimpleAgent`、`ReActAgent`、`ReflectionAgent`、`PlanSolveAgent` 四种 Agent 实现 |
-| `agents/context/` | `truncator.py` 工具输出截断的初始实现 |
 | `agents/core/` | `exceptions.py`、`lifecycle.py`、`llm_error.py`、`session_store.py`、`streaming.py` 等基础协议与运行时 |
 | `agents/observability/` | `trace_logger.py`，JSONL / HTML trace 记录 |
 | `agents/skill/` | `loader.py`，技能加载与渐进式披露 |
@@ -315,7 +313,7 @@ python -m pytest test/
 
 | 模块 | 内容 |
 | --- | --- |
-| `agents/agent/code_agent.py` | 编码智能体主循环：Function Calling、流式事件、工具执行与截断、步数与 Token 预算、上下文压缩、收尾兜底 |
+| `agents/agent/code_agent.py` | 编码智能体主循环：Function Calling、流式事件、工具执行、步数与 Token 预算、收尾兜底 |
 | `agents/core/mode.py` | `AgentMode`（plan / build / trusted）与 `ModeGuard`：模式到策略的映射、批准目录、审批入口 |
 | `agents/core/approval.py` | 审批请求与决策模型、控制台审批器、无交互默认拒绝 |
 | `agents/fs/` | 路径身份解析、读写策略、可读/可写根、`read_all` |
@@ -330,11 +328,15 @@ python -m pytest test/
 
 | 文件 | 改动内容 |
 | --- | --- |
-| `agents/core/agent.py` | 接入 `ModeGuard`；`HistoryManager` 接入窗口/摘要配置；移除旧的 Token 计数与压缩逻辑 |
-| `agents/core/config.py` | 增加摘要 LLM 的 API Key / Base URL 配置，智能摘要默认开启 |
+| `agents/core/agent.py` | 接入 `ModeGuard`；接入 `HistoryManager` 与 `ContextBuilder`；移除工具输出截断组件 |
+| `agents/core/config.py` | 三个上下文治理模块开关与窗口/阈值配置；删除旧摘要/截断配置 |
 | `agents/core/message.py` | 增加历史 id、`tool_call_id`、`tool_calls`、摘要 `replace` 区间，以及 LLM 字典互转 |
-| `agents/context/history.py` | 重构为只追加历史 + Token 校准/增量估算 + 快照 + 摘要压缩 |
-| `agents/context/token_counter.py` | 删除；Token 计量职责合并进 `HistoryManager` |
+| `agents/context/history.py` | 重构为只追加历史存储；token 计量迁到 builder，摘要/上下文组装迁出 |
+| `agents/context/builder.py` | 重写为 `ContextBuilder`：三个上下文治理模块的组装入口、token 计量 |
+| `agents/context/pruner.py` | 新增裁剪模块；本轮空实现 |
+| `agents/context/summary.py` | 新增摘要模块；本轮空实现 |
+| `agents/context/truncator.py` | 删除；工具结果全文进入历史 |
+| `agents/context/token_counter.py` | 删除；Token 计量职责已迁入 `ContextBuilder` |
 | `agents/core/llm.py` | 新增带工具调用的流式接口 |
 | `agents/core/llm_adapters.py` | OpenAI 适配器支持流式工具调用、思考过程与用量统计 |
 | `agents/core/llm_response.py` | 新增流式 chunk 类型、工具调用结构、`reasoning_content` |

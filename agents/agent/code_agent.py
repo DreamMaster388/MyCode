@@ -8,7 +8,6 @@ from ..core.llm_response import LLMStreamChunkType, ToolCall
 from ..core.message import Message
 from ..core.streaming import StreamEvent, StreamEventType
 from ..core.lifecycle import LifecycleHook
-from ..context.history import NotEnoughRoundsError
 
 
 DEFAULT_CODEC_SYSTEM_PROMPT = (
@@ -129,10 +128,10 @@ class CodeAgent(Agent):
             final_calls: List[ToolCall] = []
             usage = {}
 
-            # 1) 调用 LLM（Function Calling）：上下文每次从 HistoryManager 构建
+            # 1) 调用 LLM（Function Calling）：上下文每次由 builder 构建
             try:
                 for chunk in self.llm.stream_invoke_with_tools(
-                    messages=self.history_manager.build_context(self.system_prompt),
+                    messages=self.context_builder.build(self.system_prompt),
                     tools=schemas, tool_choice="auto", **kwargs
                 ):
                     if chunk.type == LLMStreamChunkType.THINKING:
@@ -158,7 +157,7 @@ class CodeAgent(Agent):
             # 因此 prompt_tokens 是略偏保守的上界）
             prompt_tokens = (usage or {}).get("prompt_tokens")
             if isinstance(prompt_tokens, int) and prompt_tokens > 0:
-                self.history_manager.record_prompt_tokens(prompt_tokens)
+                self.context_builder.record_prompt_tokens(prompt_tokens)
 
             self._log("model_output", {
                 "content": content,
@@ -173,7 +172,7 @@ class CodeAgent(Agent):
                 status = "success"
                 break
 
-            # 3) 把助手消息同步进历史（下一次请求由 build_context 带出）
+            # 3) 把助手消息同步进历史（下一次请求由 builder 带出）
             assistant_msg = self._assistant_msg(_StreamResponse(content, final_calls))
             self._record_llm_message(assistant_msg)
 
@@ -207,7 +206,7 @@ class CodeAgent(Agent):
                     "args": arg
                 }, step=step, run=run_index)
                 print(f"Executing tool: {tool_name}")
-                result = self._run_and_truncate(tool_name, arg)
+                result = self._execute_tool_call(tool_name, arg)
                 tool = self.tool_registry.get_tool(tool_name)
                 if tool is not None:
                     print(tool.brief(result))
@@ -225,10 +224,6 @@ class CodeAgent(Agent):
                 self._record_llm_message(
                     {"role": "tool", "tool_call_id": tool_call_id, "content": result}
                 )
-
-            # 4.5) 摘要判断：上下文超阈值时把更早的轮次压缩为 summary 消息
-            #      摘要调用也是真实花费，usage 需一并计入（未触发时为 None）。
-            _absorb(self._summarize_if_needed(step=step, run=run_index))
 
             # 5) token 预算检查（步数上限由 while 条件处理）
             if self._budget_exhausted(step, tokens_used):
@@ -291,10 +286,11 @@ class CodeAgent(Agent):
         返回 (文本, usage)：收尾调用是真实花费，调用方需把 usage 计入本次 run 的总量；
         主/降级通道都失败、没有真实调用时 usage 为 None（不参与记账）。
         """
-        # 上下文仍由 HistoryManager 构建，收尾指令只是本次请求的临时尾巴（不入历史）
-        final_messages = self.history_manager.build_context(self.system_prompt) + [
-            {"role": "user", "content": self._CONCLUDE_INSTRUCTION}
-        ]
+        # 上下文仍由 builder 构建，收尾指令只是本次请求的临时尾巴（不入历史）
+        final_messages = self.context_builder.build(
+            self.system_prompt,
+            extra_messages=[{"role": "user", "content": self._CONCLUDE_INSTRUCTION}],
+        )
 
         # 主通道：保留工具但强制 tool_choice="none"
         if schemas:
@@ -328,18 +324,6 @@ class CodeAgent(Agent):
         fallback = f"[已达到最大步数 max_steps={self.max_steps}，请告诉我是否继续。]"
         return fallback, None
 
-
-    # -------------------- 工具执行与截断 --------------------
-    def _run_and_truncate(self, tool_name: str, args: Dict[str, Any]) -> str:
-        """执行工具并对结果做输出截断（复用基类逻辑 + ObservationTruncator）。"""
-        raw = self._execute_tool_call(tool_name, args)
-        try:
-            info = self.truncator.truncate(tool_name, raw)
-            if info.get("truncated"):
-                return f"{info.get('preview', '')}\n...(输出过长，完整内容见: {info.get('full_output_path')})"
-            return info.get("preview", raw)
-        except Exception as e:
-            return raw
 
      # -------------------- 预算辅助 --------------------
 
@@ -377,34 +361,6 @@ class CodeAgent(Agent):
         recorded = Message.from_llm_dict(message)
         self.add_message(recorded)
         return recorded
-
-    def _summarize_if_needed(self, step: int, run: int) -> Optional[Dict[str, Any]]:
-        """每轮末尾做一次摘要判断（超阈值时向历史追加 summary 消息）
-
-        保留轮数 >= 当前轮数时，HistoryManager 按设计抛出 NotEnoughRoundsError；
-        这里捕获后只告警，避免摘要问题中断主循环。
-
-        返回本次摘要 LLM 调用的 usage（已计入历史花费）；未触发摘要或摘要降级
-        （不走大模型）时返回 None，避免把"没调用"误记成"调用无 usage"；
-        调用发生但供应商没回 usage 时返回 {}，由调用方按"不可用"记账。
-        """
-        self.history_manager.last_summary_usage = None
-        try:
-            summary = self.history_manager.add_summary()
-        except NotEnoughRoundsError as e:
-            print(f"⚠️ 跳过历史摘要：{e}")
-            self._log("summary_skipped", {"reason": str(e)}, step=step, run=run)
-            return None
-
-        summary_usage = self.history_manager.last_summary_usage
-        if summary is not None:
-            self._log("summary", {
-                "summary_id": summary.id,
-                "replace": summary.replace,
-                "content_chars": len(summary.content),
-                "usage": summary_usage or {},
-            }, step=step, run=run)
-        return summary_usage
 
     # -------------------- 可观测性 --------------------
     def _log(self, event: str,  payload: Dict[str, Any], step: Optional[int] = None, run: Optional[int] = None) -> None:
