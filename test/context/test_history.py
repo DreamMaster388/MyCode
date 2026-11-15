@@ -71,9 +71,12 @@ def test_append_many_messages_keeps_strictly_increasing_ids():
     [
         ([], 0),
         (["user"], 1),
+        (["user", "user"], 2),
         (["user", "assistant"], 1),
         (["user", "assistant", "user"], 2),
         (["assistant", "user", "tool"], 1),
+        (["summary", "user", "assistant"], 1),
+        (["user", "summary", "user"], 2),
         (["system", "user", "assistant", "user", "tool"], 2),
         (["user", "assistant", "tool", "summary"], 1),
     ],

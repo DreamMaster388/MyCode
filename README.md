@@ -145,7 +145,7 @@ Bash 不进入逐次审批，因为每次执行都弹窗会失去交互价值；
 
 ### 3. 上下文管理体系
 
-编码任务往往持续几十轮，上下文管理直接决定 Agent 能否稳定工作。当前上下文体系由 history（原始记录与摘要）、builder（组装）和三个上下文治理模块（截断、摘要、历史召回）组成。
+编码任务往往持续几十轮，上下文管理直接决定 Agent 能否稳定工作。当前上下文体系由 history（原始记录与摘要）、builder（组装）和三个上下文治理模块（截断、摘要、历史召回）组成；历史召回本轮仅保留开关。
 
 - **历史只追加**：消息按顺序追加并分配稳定 id，不原地修改，便于回放、序列化和缓存；
 - **Token 计量**：builder 用模型返回的真实输入 token 校准历史基线，未计量部分做增量估算；
@@ -248,7 +248,7 @@ MyCode/
 │   ├── tools/              # 工具注册、专用工具、Bash、路径授权
 │   ├── fs/                 # 路径身份与读写策略
 │   ├── sandbox/            # Landlock / bwrap 内核围栏
-│   ├── context/            # 历史存储、builder、截断/摘要/召回模块
+│   ├── context/            # 历史存储、builder、截断/摘要占位模块
 │   ├── cli/                # /mode、/allow 命令体系
 │   ├── core/               # LLM 客户端、流式协议、配置、生命周期
 │   ├── observability/      # trace 记录
@@ -332,7 +332,7 @@ python -m pytest test/
 | `agents/core/config.py` | 三个上下文治理模块开关与窗口/阈值配置；删除旧摘要/截断配置 |
 | `agents/core/message.py` | 增加历史 id、`tool_call_id`、`tool_calls`、摘要 `replace` 区间，以及 LLM 字典互转 |
 | `agents/context/history.py` | 重构为只追加历史存储；token 计量迁到 builder，摘要/上下文组装迁出 |
-| `agents/context/builder.py` | 重写为 `ContextBuilder`：三个上下文治理模块的组装入口、token 计量 |
+| `agents/context/builder.py` | 重写为 `ContextBuilder`：上下文组装、token 计量、三个治理模块的开关占位 |
 | `agents/context/pruner.py` | 新增裁剪模块；本轮空实现 |
 | `agents/context/summary.py` | 新增摘要模块；本轮空实现 |
 | `agents/context/truncator.py` | 删除；工具结果全文进入历史 |

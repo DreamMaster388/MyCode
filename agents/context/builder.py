@@ -46,14 +46,14 @@ class ContextBuilder:
         summarize = self.config.context_summary_enabled
         recall = self.config.context_recall_enabled
 
-        if truncate or summarize or recall:
-            if truncate:
-                pass  # TODO: 对 messages 做上下文裁剪
-            if summarize:
-                pass  # TODO: 对 messages 做摘要压缩
-            if recall:
-                pass  # TODO: 对 messages 做历史召回
-        else:
+        if truncate:
+            pass  # TODO: 对 messages 做上下文裁剪
+        if summarize:
+            pass  # TODO: 对 messages 做摘要压缩
+        if recall:
+            pass  # TODO: 对 messages 做历史召回
+        if not summarize:
+            # 如果没有启用摘要，则删除历史中的摘要信息，这个分支只会在会话配置中途改变时触发
             messages = [message for message in messages if message.role != "summary"]
 
         context: List[Dict[str, Any]] = []

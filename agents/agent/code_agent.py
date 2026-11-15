@@ -102,7 +102,7 @@ class CodeAgent(Agent):
             """把一次真实模型调用的 usage 计入本次 run 的总量与缓存可用性。
 
             空 dict 表示调用发生了但供应商没回 usage：token 记 0、缓存置不可用。
-            None 表示没有发生调用（如本轮未触发摘要），直接跳过。
+            None 表示没有发生真实调用（如收尾通道全部失败），直接跳过。
             """
             nonlocal tokens_used, input_tokens, output_tokens, cached_tokens
             nonlocal cache_available, usage_rounds

@@ -133,7 +133,6 @@ class Agent(ABC):
         self.history_manager.clear()
         for msg in value:
             self.history_manager.append(msg)
-        self.context_builder.reset_token_state()
 
     @abstractmethod
     def run(self, input_text: str, **kwargs) -> str:

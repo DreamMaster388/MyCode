@@ -3,6 +3,8 @@ import pytest
 
 from agents.context.builder import ContextBuilder
 from agents.context.history import HistoryManager
+from agents.context.pruner import ContextPruner
+from agents.context.summary import ContextSummarizer
 from agents.core.config import Config
 from agents.core.message import Message
 
@@ -49,10 +51,10 @@ def test_build_preserves_tool_calls_and_tool_call_id():
 
 def test_all_switches_off_drops_summary_messages():
     builder = _builder()
-    builder.history.append(Message("u", "user"))
-    builder.history.append(Message("S", "summary"))
+    builder.history.append(Message("m0", "user"))
+    builder.history.append(Message("S", "summary", replace=[0, 0]))
 
-    assert _contents(builder.build("SYS")) == ["SYS", "u"]
+    assert _contents(builder.build("SYS")) == ["SYS", "m0"]
 
 
 def test_all_switches_off_does_not_warn(capsys):
@@ -64,20 +66,40 @@ def test_all_switches_off_does_not_warn(capsys):
     assert capsys.readouterr().out == ""
 
 
-@pytest.mark.parametrize(
-    "switch",
-    ["context_truncation_enabled", "context_summary_enabled", "context_recall_enabled"],
-)
-def test_any_switch_on_keeps_messages_and_summary(switch, capsys):
-    builder = ContextBuilder(HistoryManager(), Config(**{switch: True}))
-    builder.history.append(Message("u", "user"))
-    builder.history.append(Message("S", "summary"))
+def test_summary_switch_on_keeps_summary_messages(capsys):
+    builder = ContextBuilder(HistoryManager(), Config(context_summary_enabled=True))
+    builder.history.append(Message("m0", "user"))
+    builder.history.append(Message("S", "summary", replace=[0, 0]))
 
     context = builder.build("SYS")
 
-    assert _contents(context) == ["SYS", "u", "S"]
+    # 本轮 summary 为空实现，不做 replace 遮蔽，摘要与原文都保留。
+    assert _contents(context) == ["SYS", "m0", "S"]
     assert context[2]["role"] == "user"
     assert capsys.readouterr().out == ""
+
+
+@pytest.mark.parametrize(
+    "switch",
+    ["context_truncation_enabled", "context_recall_enabled"],
+)
+def test_non_summary_switch_still_drops_summary(switch, capsys):
+    builder = ContextBuilder(HistoryManager(), Config(**{switch: True}))
+    builder.history.append(Message("m0", "user"))
+    builder.history.append(Message("S", "summary", replace=[0, 0]))
+
+    assert _contents(builder.build("SYS")) == ["SYS", "m0"]
+    assert capsys.readouterr().out == ""
+
+
+def test_pruner_stub_returns_input_unchanged():
+    messages = [Message("u", "user")]
+
+    assert ContextPruner(Config()).prune(messages) == messages
+
+
+def test_summarizer_stub_returns_none():
+    assert ContextSummarizer(Config()).maybe_summarize([Message("u", "user")]) is None
 
 
 def test_build_appends_extra_messages_without_recording_them():
@@ -104,10 +126,11 @@ def test_build_returns_a_new_list_each_call():
     ]
 
 
-def test_estimate_message_tokens_uses_characters_over_four():
+def test_estimate_message_tokens_uses_rendered_characters_over_four():
     builder = _builder()
     message = Message("x" * 400, "user")
 
+    # "[user] " (7 字符) + 400 字符 = 407；407 // 4 = 101。
     assert builder.estimate_message_tokens(message) == 101
 
 

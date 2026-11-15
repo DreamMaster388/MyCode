@@ -1,9 +1,7 @@
 """CodeAgent 上下文行为：工具结果全文进入下一次请求。"""
-from pathlib import Path
-
 from agents.agent.code_agent import CodeAgent
 from agents.core.config import Config
-from agents.core.llm_response import LLMStreamChunk, LLMStreamChunkType, ToolCall
+from agents.core.llm_response import LLMResponse, LLMStreamChunk, LLMStreamChunkType, ToolCall
 from agents.tools.base import Tool
 from agents.tools.registry import ToolRegistry
 from agents.tools.response import ToolResponse
@@ -54,6 +52,20 @@ class _RecordingLLM:
         raise AssertionError("not used")
 
 
+class _ConcludeLLM(_RecordingLLM):
+    def __init__(self):
+        super().__init__()
+        self.conclude_requests = []
+
+    def invoke_with_tools(self, messages, tools, tool_choice="auto", **kwargs):
+        self.conclude_requests.append(list(messages))
+        return LLMResponse(
+            content="concluded",
+            model=self.model,
+            usage={"prompt_tokens": 5, "completion_tokens": 1, "total_tokens": 6},
+        )
+
+
 def _config() -> Config:
     return Config(
         trace_enabled=False,
@@ -65,7 +77,8 @@ def _config() -> Config:
     )
 
 
-def test_tool_output_full_text_reaches_next_request(tmp_path):
+def test_tool_output_full_text_reaches_next_request(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
     long_text = "\n".join(f"line {i}" for i in range(3000))
     registry = ToolRegistry()
     tool = _LongOutputTool(long_text)
@@ -90,7 +103,7 @@ def test_tool_output_full_text_reaches_next_request(tmp_path):
     assert tool_messages[0]["content"] == long_text
     assert tool_messages[0]["tool_call_id"] == "call-1"
     assert "完整内容见" not in tool_messages[0]["content"]
-    assert list(Path(tmp_path).iterdir()) == []
+    assert list(tmp_path.iterdir()) == []
 
 
 def test_agent_records_prompt_tokens_on_builder():
@@ -111,3 +124,29 @@ def test_agent_records_prompt_tokens_on_builder():
     list(agent.stream_run("run"))
 
     assert agent.context_builder.should_compress() is True
+
+
+def test_conclude_instruction_is_temporary_and_not_recorded():
+    registry = ToolRegistry()
+    registry.register_tool(_LongOutputTool("ok"))
+    llm = _ConcludeLLM()
+    agent = CodeAgent(
+        name="context-check",
+        llm=llm,
+        tool_registry=registry,
+        system_prompt="SYS",
+        config=_config(),
+        max_steps=1,
+    )
+
+    list(agent.stream_run("run"))
+
+    assert len(llm.conclude_requests) == 1
+    assert llm.conclude_requests[0][-1] == {
+        "role": "user",
+        "content": CodeAgent._CONCLUDE_INSTRUCTION,
+    }
+    assert all(
+        message.content != CodeAgent._CONCLUDE_INSTRUCTION
+        for message in agent.history_manager.get_history()
+    )
