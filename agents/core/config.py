@@ -26,6 +26,7 @@ class Config(BaseModel):
     context_truncation_head_chars: int = 1500  # 保留开头字符数
     context_truncation_tail_chars: int = 500  # 保留结尾字符数
     context_summary_enabled: bool = False  # 是否启用摘要
+    context_summary_keep_rounds: int = 10  # 摘要时完整保留最近多少轮
     context_recall_enabled: bool = False  # 是否启用历史召回
 
     @model_validator(mode="after")
@@ -43,6 +44,13 @@ class Config(BaseModel):
             self.context_truncation_threshold = 2000
             self.context_truncation_head_chars = 1500
             self.context_truncation_tail_chars = 500
+        return self
+
+    @model_validator(mode="after")
+    def _fallback_invalid_summary_config(self) -> "Config":
+        """摘要保留轮数非法时回退默认值，不中断 Config 创建。"""
+        if self.context_summary_keep_rounds < 1:
+            self.context_summary_keep_rounds = 10
         return self
 
     # 可观测性配置

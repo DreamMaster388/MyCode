@@ -14,7 +14,7 @@ class Message(BaseModel):
     tool_call_id: Optional[str] = None
     # 与 code_agent 循环中的 message 对齐: role='assistant' 时的工具调用列表
     tool_calls: Optional[List[Dict[str, Any]]] = None
-    # 仅 role='summary' 时非空: 记录该摘要遮蔽了哪些原始消息 (被遮蔽消息的 id 列表)
+    # 仅 role='summary' 时非空: 记录该摘要直接遮蔽的消息 id 完整列表
     replace: List[int] = Field(default_factory=list)
     timestamp: Optional[datetime] = None
     metadata: Optional[Dict[str, Any]] = None

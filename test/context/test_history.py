@@ -189,7 +189,7 @@ def test_history_no_longer_owns_context_token_or_summary():
         "build_context",
         "build_snapshot",
         "estimate_message_tokens",
-        "should_compress",
+        "should_summarize",
         "record_prompt_tokens",
         "add_summary",
         "summarize",

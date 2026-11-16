@@ -123,7 +123,7 @@ def test_agent_records_prompt_tokens_on_builder():
 
     list(agent.stream_run("run"))
 
-    assert agent.context_builder.should_compress() is True
+    assert agent.context_builder.should_summarize() is True
 
 
 def test_conclude_instruction_is_temporary_and_not_recorded():
