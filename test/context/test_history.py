@@ -70,25 +70,32 @@ def test_append_many_messages_keeps_strictly_increasing_ids():
     "roles, expected",
     [
         ([], 0),
-        (["user"], 1),
-        (["user", "user"], 2),
+        (["user"], 0),
+        (["user", "user"], 0),
         (["user", "assistant"], 1),
-        (["user", "assistant", "user"], 2),
+        (["user", "assistant", "user"], 1),
         (["assistant", "user", "tool"], 1),
         (["summary", "user", "assistant"], 1),
-        (["user", "summary", "user"], 2),
-        (["system", "user", "assistant", "user", "tool"], 2),
+        (["user", "summary", "user"], 0),
+        (["system", "user", "assistant", "user", "tool"], 1),
         (["user", "assistant", "tool", "summary"], 1),
+        (["user", "assistant", "tool", "assistant", "tool"], 2),
+        (["assistant", "assistant"], 2),
+        (["tool"], 0),
     ],
 )
 def test_estimate_rounds(roles, expected):
     assert _manager_with(roles).estimate_rounds() == expected
 
 
-def test_find_round_boundaries_returns_user_indexes():
-    manager = _manager_with(["system", "user", "assistant", "user", "tool", "user"])
+def test_find_round_boundaries_returns_assistant_indexes():
+    manager = _manager_with(["system", "user", "assistant", "user", "tool", "assistant"])
 
-    assert manager.find_round_boundaries() == [1, 3, 5]
+    assert manager.find_round_boundaries() == [2, 5]
+
+
+def test_find_round_boundaries_empty_history_returns_empty_list():
+    assert HistoryManager().find_round_boundaries() == []
 
 
 # --------------------------------------------------------------------------- #
@@ -120,13 +127,13 @@ def test_clear_removes_messages_but_keeps_id_counter_and_bumps_revision():
 # --------------------------------------------------------------------------- #
 
 def test_to_dict_contains_history_next_id_rounds():
-    manager = _manager_with(["user", "assistant", "user"])
+    manager = _manager_with(["user", "assistant", "user", "assistant"])
 
     data = manager.to_dict()
 
-    assert data["next_id"] == 3
+    assert data["next_id"] == 4
     assert data["rounds"] == 2
-    assert len(data["history"]) == 3
+    assert len(data["history"]) == 4
     assert data["history"][0]["content"] == "m0"
 
 

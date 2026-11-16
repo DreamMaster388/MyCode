@@ -75,32 +75,25 @@ class HistoryManager:
         self._revision += 1
 
     def estimate_rounds(self) -> int:
-        """预估完整轮次数。
+        """返回轮次数。
 
-        一轮定义：1 user 消息 + N 条 assistant/tool/summary 消息。
+        一轮定义：一条 assistant 消息；每条写入历史的 assistant 消息算一轮，
+        不以 user 消息或用户请求为单位。
 
         Returns:
-            完整轮次数
+            轮次数
         """
-        rounds = 0
-        i = 0
-        while i < len(self._history):
-            if self._history[i].role == "user":
-                rounds += 1
-                i += 1
-                while i < len(self._history) and self._history[i].role != "user":
-                    i += 1
-            else:
-                i += 1
-        return rounds
+        return sum(1 for message in self._history if message.role == "assistant")
 
     def find_round_boundaries(self) -> List[int]:
-        """查找每轮的起始索引。
+        """查找每轮的起始索引（assistant 消息下标）。
 
         Returns:
-            每轮起始索引列表，例如 [0, 3, 7, 10]
+            assistant 消息下标列表，例如 [1, 3, 7]
         """
-        return [i for i, message in enumerate(self._history) if message.role == "user"]
+        return [
+            i for i, message in enumerate(self._history) if message.role == "assistant"
+        ]
 
     def to_dict(self) -> Dict[str, Any]:
         """序列化为字典（用于会话保存）。
