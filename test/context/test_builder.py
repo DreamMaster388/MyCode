@@ -3,7 +3,6 @@ import pytest
 
 from agents.context.builder import ContextBuilder
 from agents.context.history import HistoryManager
-from agents.context.pruner import ContextPruner
 from agents.context.summary import ContextSummarizer
 from agents.core.config import Config
 from agents.core.message import Message
@@ -15,6 +14,20 @@ def _builder() -> ContextBuilder:
 
 def _contents(context):
     return [message["content"] for message in context]
+
+
+def _pruning_builder(**overrides) -> ContextBuilder:
+    config = {
+        "context_truncation_rounds": 2,
+        "context_truncation_threshold": 20,
+        "context_truncation_head_chars": 10,
+        "context_truncation_tail_chars": 5,
+    }
+    config.update(overrides)
+    return ContextBuilder(
+        HistoryManager(),
+        Config(context_truncation_enabled=True, **config),
+    )
 
 
 def test_build_includes_system_and_history_in_order():
@@ -92,10 +105,244 @@ def test_non_summary_switch_still_drops_summary(switch, capsys):
     assert capsys.readouterr().out == ""
 
 
-def test_pruner_stub_returns_input_unchanged():
-    messages = [Message("u", "user")]
+def test_config_pruning_defaults():
+    config = Config()
 
-    assert ContextPruner(Config()).prune(messages) == messages
+    assert config.context_truncation_rounds == 10
+    assert config.context_truncation_threshold == 2000
+    assert config.context_truncation_head_chars == 1500
+    assert config.context_truncation_tail_chars == 500
+    assert config.context_truncation_enabled is False
+
+
+def test_config_keeps_valid_pruning_values():
+    config = Config(
+        context_truncation_rounds=3,
+        context_truncation_threshold=100,
+        context_truncation_head_chars=60,
+        context_truncation_tail_chars=40,
+        context_truncation_enabled=True,
+    )
+
+    assert config.context_truncation_rounds == 3
+    assert config.context_truncation_threshold == 100
+    assert config.context_truncation_head_chars == 60
+    assert config.context_truncation_tail_chars == 40
+    assert config.context_truncation_enabled is True
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"context_truncation_rounds": -1},
+        {"context_truncation_threshold": 0},
+        {"context_truncation_head_chars": -1},
+        {"context_truncation_tail_chars": -1},
+        {"context_truncation_head_chars": 2000, "context_truncation_tail_chars": 500},
+    ],
+)
+def test_invalid_pruning_config_falls_back_to_defaults(overrides):
+    config = Config(context_truncation_enabled=True, **overrides)
+
+    assert config.context_truncation_enabled is True
+    assert config.context_truncation_rounds == 10
+    assert config.context_truncation_threshold == 2000
+    assert config.context_truncation_head_chars == 1500
+    assert config.context_truncation_tail_chars == 500
+
+
+def test_invalid_pruning_config_resets_all_four_values():
+    config = Config(
+        context_truncation_rounds=3,
+        context_truncation_threshold=100,
+        context_truncation_head_chars=-1,
+        context_truncation_tail_chars=40,
+    )
+
+    assert config.context_truncation_rounds == 10
+    assert config.context_truncation_threshold == 2000
+    assert config.context_truncation_head_chars == 1500
+    assert config.context_truncation_tail_chars == 500
+
+
+def test_pruner_keeps_short_recent_tool_content():
+    builder = _pruning_builder()
+    builder.history.append(Message("u", "user"))
+    builder.history.append(Message("a", "assistant"))
+    builder.history.append(Message("short", "tool", tool_call_id="c1"))
+
+    context = builder.build()
+
+    assert context[-1]["content"] == "short"
+    assert context[-1]["tool_call_id"] == "c1"
+
+
+def test_pruner_wraps_recent_long_tool_content_with_newlines():
+    builder = _pruning_builder()
+    builder.history.append(Message("u", "user"))
+    builder.history.append(Message("a", "assistant"))
+    original = "H" * 10 + "M" * 35 + "T" * 5
+    builder.history.append(Message(original, "tool", tool_call_id="c1"))
+
+    context = builder.build("SYS")
+
+    expected = (
+        "H" * 10
+        + "\n"
+        + "已裁剪，详情参见记忆2中偏移10，长度35"
+        + "\n"
+        + "T" * 5
+    )
+    assert context[-1]["content"] == expected
+    assert context[-1]["tool_call_id"] == "c1"
+    assert builder.history.get_history()[-1].content == original
+
+
+def test_pruner_keeps_tool_after_one_assistant_when_two_rounds_configured():
+    builder = _pruning_builder()
+    builder.history.append(Message("u", "user"))
+    builder.history.append(Message("a1", "assistant"))
+    original = "H" * 10 + "M" * 35 + "T" * 5
+    builder.history.append(Message(original, "tool", tool_call_id="c1"))
+    builder.history.append(Message("a2", "assistant"))
+
+    context = builder.build()
+
+    expected = (
+        "H" * 10
+        + "\n"
+        + "已裁剪，详情参见记忆2中偏移10，长度35"
+        + "\n"
+        + "T" * 5
+    )
+    assert context[2]["content"] == expected
+
+
+def test_pruner_keeps_recent_content_when_candidate_would_grow():
+    builder = _pruning_builder()
+    builder.history.append(Message("u", "user"))
+    builder.history.append(Message("a", "assistant"))
+    original = "X" * 20
+    builder.history.append(Message(original, "tool", tool_call_id="c1"))
+
+    context = builder.build()
+
+    assert context[-1]["content"] == original
+
+
+def test_pruner_replaces_old_tool_content_with_marker():
+    builder = _pruning_builder()
+    builder.history.append(Message("u", "user"))
+    builder.history.append(Message("a1", "assistant"))
+    original = "H" * 10 + "M" * 35 + "T" * 5
+    builder.history.append(Message(original, "tool", tool_call_id="c1"))
+    builder.history.append(Message("a2", "assistant"))
+    builder.history.append(Message("a3", "assistant"))
+
+    context = builder.build()
+
+    assert context[2]["content"] == "已裁剪，详情参见记忆2中偏移0，长度50"
+    assert builder.history.get_history()[2].content == original
+
+
+def test_pruner_keeps_short_old_tool_content_when_marker_would_grow():
+    builder = _pruning_builder()
+    builder.history.append(Message("u", "user"))
+    builder.history.append(Message("a1", "assistant"))
+    builder.history.append(Message("ok", "tool", tool_call_id="c1"))
+    builder.history.append(Message("a2", "assistant"))
+    builder.history.append(Message("a3", "assistant"))
+
+    context = builder.build()
+
+    assert context[2]["content"] == "ok"
+
+
+def test_pruner_tail_zero_keeps_trailing_newline():
+    builder = _pruning_builder(context_truncation_tail_chars=0)
+    builder.history.append(Message("u", "user"))
+    builder.history.append(Message("a", "assistant"))
+    original = "H" * 10 + "M" * 40
+    builder.history.append(Message(original, "tool", tool_call_id="c1"))
+
+    context = builder.build()
+
+    expected = (
+        "H" * 10
+        + "\n"
+        + "已裁剪，详情参见记忆2中偏移10，长度40"
+        + "\n"
+    )
+    assert context[-1]["content"] == expected
+
+
+def test_pruner_marker_index_includes_summary_before_dropping_it():
+    builder = _pruning_builder()
+    builder.history.append(Message("u", "user"))
+    builder.history.append(Message("S", "summary", replace=[0, 0]))
+    builder.history.append(Message("a", "assistant"))
+    original = "H" * 10 + "M" * 35 + "T" * 5
+    builder.history.append(Message(original, "tool", tool_call_id="c1"))
+
+    context = builder.build()
+
+    expected = (
+        "H" * 10
+        + "\n"
+        + "已裁剪，详情参见记忆3中偏移10，长度35"
+        + "\n"
+        + "T" * 5
+    )
+    assert context[-1]["content"] == expected
+    assert [message["role"] for message in context] == ["user", "assistant", "tool"]
+
+
+def test_pruner_does_not_touch_non_tool_messages():
+    builder = _pruning_builder(context_summary_enabled=True)
+    builder.history.append(Message("U" * 50, "user"))
+    builder.history.append(Message("A" * 50, "assistant"))
+    original = "H" * 10 + "M" * 35 + "T" * 5
+    builder.history.append(Message(original, "tool", tool_call_id="c1"))
+    builder.history.append(Message("S" * 50, "summary", replace=[0, 0]))
+
+    context = builder.build()
+
+    expected_tool = (
+        "H" * 10
+        + "\n"
+        + "已裁剪，详情参见记忆2中偏移10，长度35"
+        + "\n"
+        + "T" * 5
+    )
+    assert context[0]["content"] == "U" * 50
+    assert context[1]["content"] == "A" * 50
+    assert context[2]["content"] == expected_tool
+    assert context[3]["content"] == "S" * 50
+
+
+def test_pruner_does_not_touch_extra_messages():
+    builder = _pruning_builder()
+    builder.history.append(Message("u", "user"))
+    builder.history.append(Message("a", "assistant"))
+    builder.history.append(Message("short", "tool", tool_call_id="c1"))
+    extra = [{"role": "tool", "content": "E" * 100, "tool_call_id": "x"}]
+
+    context = builder.build(extra_messages=extra)
+
+    assert context[-1] is extra[0]
+    assert context[-1]["content"] == "E" * 100
+
+
+def test_switch_off_keeps_long_tool_content():
+    builder = ContextBuilder(HistoryManager(), Config())
+    builder.history.append(Message("u", "user"))
+    builder.history.append(Message("a", "assistant"))
+    original = "H" * 10 + "M" * 35 + "T" * 5
+    builder.history.append(Message(original, "tool", tool_call_id="c1"))
+
+    context = builder.build()
+
+    assert context[-1]["content"] == original
 
 
 def test_summarizer_stub_returns_none():

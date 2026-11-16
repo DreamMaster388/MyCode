@@ -2,7 +2,7 @@
 
 职责：
 - 组装 system 提示词、历史消息和临时消息。
-- 截断、摘要、历史召回三个上下文治理模块的编排入口；本轮三个分支为空。
+- 截断、摘要、历史召回三个上下文治理模块的编排入口；截断已实现，摘要与历史召回仍为空。
 """
 
 from typing import Any, Dict, List, Optional
@@ -10,6 +10,7 @@ from typing import Any, Dict, List, Optional
 from ..core.config import Config
 from ..core.message import Message
 from .history import HistoryManager
+from .pruner import ContextPruner
 
 
 class ContextBuilder:
@@ -18,6 +19,7 @@ class ContextBuilder:
     def __init__(self, history: HistoryManager, config: Config):
         self.history = history
         self.config = config
+        self.pruner = ContextPruner(config)
         # 大模型侧返回的真实输入 token 数（覆盖 history[0, _history_token_count_idx)）
         self._history_token_count = 0
         # 上述 token 数对应的历史区间右边界
@@ -47,7 +49,7 @@ class ContextBuilder:
         recall = self.config.context_recall_enabled
 
         if truncate:
-            pass  # TODO: 对 messages 做上下文裁剪
+            messages = self.pruner.prune(messages)
         if summarize:
             pass  # TODO: 对 messages 做摘要压缩
         if recall:
