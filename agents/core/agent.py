@@ -16,8 +16,8 @@ class Agent(ABC):
     """Agent基类
 
     集成能力：
-    - HistoryManager: 历史管理与 token 计量
-    - ObservationTruncator: 工具输出截断
+    - HistoryManager: 原始记录与摘要存储
+    - ContextBuilder: 上下文组装与 token 计量
     - TraceLogger: 可观测性（JSONL + HTML）
     - ToolRegistry: 工具管理（可选）
     - SkillLoader: 知识外化（可选）
@@ -49,22 +49,10 @@ class Agent(ABC):
 
         # 新增：上下文工程组件
         from ..context.history import HistoryManager
-        from ..context.truncator import ObservationTruncator
+        from ..context.builder import ContextBuilder
 
-        self.history_manager = HistoryManager(
-            min_retain_rounds=self.config.min_retain_rounds,
-            compression_threshold=self.config.compression_threshold,
-            context_window=self.config.context_window,
-            config=self.config,
-            llm=self.llm
-        )
-
-        self.truncator = ObservationTruncator(
-            max_lines=self.config.tool_output_max_lines,
-            max_bytes=self.config.tool_output_max_bytes,
-            truncate_direction=self.config.tool_output_truncate_direction,
-            output_dir=self.config.tool_output_dir
-        )
+        self.history_manager = HistoryManager()
+        self.context_builder = ContextBuilder(self.history_manager, self.config)
 
         # 新增：可观测性组件
         from ..observability.trace_logger import TraceLogger

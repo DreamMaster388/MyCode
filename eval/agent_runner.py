@@ -1,13 +1,11 @@
 """运行 HelloAgents CodeAgent 于某个用例仓库，返回最终文本与统计信息。
 
 工具已全部显式绑定到用例工作目录(BashTool 用 cwd, 文件/grep/glob 用 project_root),
-因此无需切换进程 cwd; 截断器完整输出固定到仓库外的绝对路径, 避免污染模型补丁。
+因此无需切换进程 cwd; 工具结果全文进入历史, 不再落盘。
 统计信息从 agent 的会话元数据读取。
 """
 from __future__ import annotations
 
-import os
-import tempfile
 from typing import Dict
 
 from dotenv import load_dotenv
@@ -40,11 +38,6 @@ SYSTEM_PROMPT = (
     "Keep the final answer short."
 )
 
-# 截断器完整输出目录: 固定到系统临时区, 不落在 workdir 内,
-# 否则会被 harness 的 `git add -A` 计入模型补丁。
-TOOL_OUTPUT_DIR = os.path.join(tempfile.gettempdir(), "helloagents-eval-tool-output")
-
-
 def build_agent(workdir: str, max_steps: int = 25) -> CodeAgent:
     """构造绑定到 workdir 的 CodeAgent（关闭影响评测的附加功能）。"""
     llm = HelloAgentsLLM()
@@ -75,7 +68,6 @@ def build_agent(workdir: str, max_steps: int = 25) -> CodeAgent:
         subagent_enabled=False,
         todowrite_enabled=False,
         devlog_enabled=False,
-        tool_output_dir=TOOL_OUTPUT_DIR,
     )
     return CodeAgent(
         name="EvalCodingAgent",
@@ -92,8 +84,7 @@ def build_agent(workdir: str, max_steps: int = 25) -> CodeAgent:
 def run_agent(workdir: str, problem: str, max_steps: int = 25) -> Dict:
     """在 workdir 内运行 agent 解决问题。返回含最终文本与统计信息的 dict。
 
-    不切换进程 cwd: bash/文件/grep/glob 均已显式绑定 workdir,
-    截断器输出目录为 TOOL_OUTPUT_DIR 绝对路径。
+    不切换进程 cwd: bash/文件/grep/glob 均已显式绑定 workdir。
     """
     agent = build_agent(workdir, max_steps=max_steps)
     final_text = agent.run(problem)

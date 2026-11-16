@@ -8,7 +8,6 @@ from __future__ import annotations
 
 import os
 import re
-import tempfile
 import time
 from typing import Any, Dict, List, Optional
 
@@ -28,10 +27,6 @@ from .docker_sandbox import CONTAINER_WORKDIR, DockerSandbox
 from .swebench_io import eval_activation_prefix, image_for
 
 DEFAULT_MODEL_NAME = os.environ.get("LLM_MODEL_ID", "codeagent")
-
-# 工具完整输出固定到仓库外的目录；优先 /mnt/data，避免撑爆根盘。
-_EVAL_TMP = "/mnt/data/lyd/tmp" if os.path.isdir("/mnt/data/lyd/tmp") else tempfile.gettempdir()
-TOOL_OUTPUT_DIR = os.path.join(_EVAL_TMP, "helloagents-eval-tool-output")
 
 SYSTEM_PROMPT = (
     "You are an autonomous coding agent fixing a real issue in a software repository. "
@@ -128,7 +123,6 @@ def build_agent(sandbox: DockerSandbox, max_steps: int = 50) -> InstrumentedCode
         subagent_enabled=False,
         todowrite_enabled=False,
         devlog_enabled=False,
-        tool_output_dir=TOOL_OUTPUT_DIR,
     )
     return InstrumentedCodeAgent(
         name="EvalCodingAgent",

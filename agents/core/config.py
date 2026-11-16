@@ -17,28 +17,12 @@ class Config(BaseModel):
     debug: bool = False
     log_level: str = "INFO"
 
-    # 历史管理配置（向后兼容）
-    max_history_length: int = 100
-
     # 上下文工程配置
     context_window: int = 128000  # 上下文窗口大小（tokens）
     compression_threshold: float = 0.8  # 压缩阈值（0.8 = 80%时触发压缩）
-    min_retain_rounds: int = 10  # 压缩时保留的最小完整轮次数
-    enable_smart_compression: bool = True  # 是否用大模型生成摘要（关闭则降级为简单摘要）
-
-    # 智能摘要配置
-    summary_llm_provider: str = "deepseek"  # 摘要专用 LLM 提供商
-    summary_llm_model: str = "deepseek-chat"  # 摘要专用 LLM 模型
-    summary_llm_api_key: Optional[str] = None  # 摘要 LLM 的 api key；未设置时复用主 Agent 的
-    summary_llm_base_url: Optional[str] = None  # 摘要 LLM 的 base url；未设置时复用主 Agent 的
-    summary_max_tokens: int = 800  # 摘要最大 Token 数
-    summary_temperature: float = 0.3  # 摘要生成温度（更确定性）
-
-    # 工具输出截断配置
-    tool_output_max_lines: int = 2000  # 工具输出最大行数
-    tool_output_max_bytes: int = 51200  # 工具输出最大字节数（50KB）
-    tool_output_dir: str = "tool-output"  # 完整输出保存目录
-    tool_output_truncate_direction: str = "head"  # 截断方向：head/tail/head_tail
+    context_truncation_enabled: bool = False  # 是否启用上下文裁剪
+    context_summary_enabled: bool = False  # 是否启用摘要
+    context_recall_enabled: bool = False  # 是否启用历史召回
 
     # 可观测性配置
     trace_enabled: bool = True  # 是否启用 Trace 记录
