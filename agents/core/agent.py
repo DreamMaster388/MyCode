@@ -52,7 +52,9 @@ class Agent(ABC):
         from ..context.builder import ContextBuilder
 
         self.history_manager = HistoryManager()
-        self.context_builder = ContextBuilder(self.history_manager, self.config)
+        self.context_builder = ContextBuilder(
+            self.history_manager, self.config, self.llm
+        )
 
         # 新增：可观测性组件
         from ..observability.trace_logger import TraceLogger

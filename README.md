@@ -150,9 +150,9 @@ Bash 不进入逐次审批，因为每次执行都弹窗会失去交互价值；
 - **历史只追加**：消息按顺序追加并分配稳定 id，不原地修改，便于回放、序列化和缓存；
 - **Token 计量**：builder 用模型返回的真实输入 token 校准历史基线，未计量部分做增量估算；
 - **上下文治理模块**：截断、摘要、历史召回分别由三个开关控制，默认全关；截断与摘要已实现，历史召回仍为空实现。三开关全关时，直接发送历史并丢弃 summary 消息，不做溢出检查；
-- **摘要**：开启后按 token 阈值触发；先在裁剪视图上按摘要的 `replace` 遮蔽消息并把摘要前插，再保留最近 `context_summary_keep_rounds`（默认 10）轮，把更早的摘要与压缩区生成一条 content 为空的新摘要 append 进 history；`replace` 记录本次直接遮蔽的消息 id 完整列表；保留区未达上限就触发压缩的情况本轮未处理；
+- **摘要**：开启后按 token 阈值触发；先在裁剪视图上按摘要的 `replace` 遮蔽消息并把摘要前插，再保留最近 `context_summary_keep_rounds`（默认 10）轮，把更早的压缩区（有旧摘要时连同旧摘要）交给主 LLM 生成结构化摘要——无旧摘要走普通摘要，有旧摘要走增量摘要。摘要使用中文八个小节（当前任务 / 项目背景 / 已完成工作 / 当前实现状态 / 技术决策 / 问题与风险 / 待办事项 / 用户偏好与约束），关键点用 `[id=N]` 标注来源；输入按选区原样渲染，不额外裁剪；模型异常或返回空时降级为只保留 role/id 的占位摘要。`replace` 记录本次直接遮蔽的消息 id 完整列表。摘要调用的 usage 计入本次 run 的输入/输出/缓存/总 tokens 与 `max_run_tokens` 预算；`total_steps` 与评测请求次数不变。已知限制：压缩区为空仍会调用模型并 append；保留区自身超阈值时可能每步重复摘要；增量降级会保留旧摘要并累积 role/id 行；输入超窗失败即降级；不校验输出格式与引用；保留区未达上限就触发压缩未处理；
 - **工具输出**：工具结果全文进入历史、不落盘；发送前由 pruner 对最近轮内的超长工具输出保留头尾、对更早轮次整体替换为 marker，且只在结果更短时替换，history 原文不变；
-- **可观测性**：每轮模型输出、工具调用与结果写入 trace，便于复盘失败路径。
+- **可观测性**：每轮模型输出、工具调用与结果，以及摘要调用（模式、降级、usage、耗时、内容）写入 trace，便于复盘失败路径和摘要成本。
 
 这套机制的目标不是“塞进更多内容”，而是在有限预算内保留最有用的信息。
 
@@ -314,7 +314,7 @@ python -m pytest test/
 
 | 模块 | 内容 |
 | --- | --- |
-| `agents/agent/code_agent.py` | 编码智能体主循环：Function Calling、流式事件、工具执行、步数与 Token 预算、收尾兜底 |
+| `agents/agent/code_agent.py` | 编码智能体主循环：Function Calling、流式事件、工具执行、步数与 Token 预算、收尾兜底、摘要 usage 记账与 trace |
 | `agents/core/mode.py` | `AgentMode`（plan / build / trusted）与 `ModeGuard`：模式到策略的映射、批准目录、审批入口 |
 | `agents/core/approval.py` | 审批请求与决策模型、控制台审批器、无交互默认拒绝 |
 | `agents/fs/` | 路径身份解析、读写策略、可读/可写根、`read_all` |
@@ -335,7 +335,7 @@ python -m pytest test/
 | `agents/context/history.py` | 重构为只追加历史存储；token 计量迁到 builder，摘要/上下文组装迁出 |
 | `agents/context/builder.py` | 重写为 `ContextBuilder`：上下文组装、token 计量、截断与摘要已接入，召回占位 |
 | `agents/context/pruner.py` | 裁剪模块：按轮次和字符阈值裁剪工具消息，不改写 history |
-| `agents/context/summary.py` | 摘要模块：遮蔽、选区与普通/增量摘要消息；content 本轮为空占位 |
+| `agents/context/summary.py` | 摘要模块：遮蔽、选区、普通/增量摘要 prompt、主 LLM 调用与降级 |
 | `agents/context/truncator.py` | 删除；工具结果全文进入历史 |
 | `agents/context/token_counter.py` | 删除；Token 计量职责已迁入 `ContextBuilder` |
 | `agents/core/llm.py` | 新增带工具调用的流式接口 |

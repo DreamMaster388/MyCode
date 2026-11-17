@@ -1,6 +1,6 @@
 # Spec: 摘要内容生成（普通摘要 + 增量摘要）
 
-作者：lyd。状态：待确认。
+作者：lyd。状态：已批准。
 
 一句话：把摘要模块从“只生成空占位”接成真正的模型摘要——无旧摘要走普通摘要、有旧摘要走增量摘要，输入按现有选区原样使用，用固定中文结构化 prompt 生成带 `[id=N]` 来源标注的内容；模型异常或返回空时降级为 role/id 占位摘要，usage 计入 run 统计、预算与 trace。
 
@@ -43,7 +43,7 @@
 
 ### 模块职责
 
-- **summary 模块**：`ContextSummarizer` 无状态，持有 Config 和可选的 LLM 客户端。提供 `apply_summary_masking`、`select_summary_region`、`summarize(compression)`、`summarize_incremental(previous, compression)`；前两个算法不变，后两个返回轻量结果对象 `SummaryOutcome`，内含摘要 `Message`、模式（普通/增量）、usage、是否降级、错误摘要。prompt 与渲染为模块内常量/私有辅助函数。
+- **summary 模块**：`ContextSummarizer` 无状态，持有 Config 和可选的 LLM 客户端。提供 `apply_summary_masking`、`select_summary_region`、`summarize(compression)`、`summarize_incremental(previous, compression)`；前两个算法不变，后两个返回轻量结果对象 `SummaryOutcome`，内含摘要 `Message`、模式（普通/增量）、usage、是否降级、错误摘要与可选的调用耗时。prompt 与渲染为模块内常量/私有辅助函数。
 - **builder**：`ContextBuilder` 新增可选 LLM 构造参数并传给摘要器；编排顺序不变（裁剪 → 遮蔽 → 触发 → 选区 → 生成 → append → 返回 `[摘要] + 完整保留区`）。每次 `build()` 记录最近一次摘要结果，提供 `take_summary_outcome()` 供调用方消费；消费后清空，避免重复计费。
 - **CodeAgent**：在每次 `build()`（含收尾 `_conclude` 内部的 build）之后消费摘要结果，把 usage 交给现有 `_absorb`，并写 `summary` trace 事件。主循环、预算、`total_steps` 语义不变。
 - **Config**：不新增字段。
@@ -207,4 +207,4 @@
 
 ## 收尾
 
-本规格待确认。确认后运行 `/tickets` 拆分实现票。
+本规格已批准；拆票见 `issues/`，实现状态以各票为准。
