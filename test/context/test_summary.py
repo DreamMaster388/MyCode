@@ -181,26 +181,40 @@ def test_select_region_keep_rounds_is_configurable():
     assert [message.content for message in keep] == ["u2", "a3"]
 
 
-def test_summarize_returns_empty_summary_with_compression_ids():
+def test_summarize_without_llm_returns_degraded_outcome():
     compression = [Message("m0", "user", id=0), Message("m1", "assistant", id=1)]
 
-    summary = ContextSummarizer(Config()).summarize(compression)
+    outcome = ContextSummarizer(Config()).summarize(compression)
+    summary = outcome.message
 
     assert summary.role == "summary"
-    assert summary.content == ""
+    assert summary.content.startswith("【历史对话摘要（降级）】")
+    assert "- [user] id=0" in summary.content
+    assert "- [assistant] id=1" in summary.content
     assert summary.replace == [0, 1]
     assert summary.id is None
+    assert outcome.mode == "normal"
+    assert outcome.usage is None
+    assert outcome.degraded is True
+    assert outcome.error
 
 
-def test_summarize_incremental_directly_masks_old_summary_and_compression():
+def test_summarize_incremental_without_llm_returns_degraded_outcome():
     previous = Message("S1", "summary", id=5, replace=[0, 1])
     compression = [Message("m6", "user", id=6), Message("m7", "assistant", id=7)]
 
-    summary = ContextSummarizer(Config()).summarize_incremental(
+    outcome = ContextSummarizer(Config()).summarize_incremental(
         previous, compression
     )
+    summary = outcome.message
 
     assert summary.role == "summary"
-    assert summary.content == ""
+    assert summary.content.startswith("S1\n\n【新增已压缩消息（降级）】")
+    assert "- [user] id=6" in summary.content
+    assert "- [assistant] id=7" in summary.content
     assert summary.replace == [5, 6, 7]
     assert summary.id is None
+    assert outcome.mode == "incremental"
+    assert outcome.usage is None
+    assert outcome.degraded is True
+    assert outcome.error

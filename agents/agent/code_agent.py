@@ -119,6 +119,26 @@ class CodeAgent(Agent):
             if not u.get("cache_hit_available", False):
                 cache_available = False
 
+        def _consume_summary(summary_step: int) -> None:
+            """消费 builder 最近一次摘要结果：记账并写 trace。"""
+            outcome = self.context_builder.take_summary_outcome()
+            if outcome is None:
+                return
+            _absorb(outcome.usage)
+            self._log(
+                "summary",
+                {
+                    "mode": outcome.mode,
+                    "degraded": outcome.degraded,
+                    "error": outcome.error,
+                    "usage": outcome.usage,
+                    "latency_ms": outcome.latency_ms,
+                    "content": outcome.message.content,
+                },
+                step=summary_step,
+                run=run_index,
+            )
+
         # ------------ 运行循环 -------------
         while step < self.max_steps:
             step += 1
@@ -130,8 +150,10 @@ class CodeAgent(Agent):
 
             # 1) 调用 LLM（Function Calling）：上下文每次由 builder 构建
             try:
+                request_messages = self.context_builder.build(self.system_prompt)
+                _consume_summary(step)
                 for chunk in self.llm.stream_invoke_with_tools(
-                    messages=self.context_builder.build(self.system_prompt),
+                    messages=request_messages,
                     tools=schemas, tool_choice="auto", **kwargs
                 ):
                     if chunk.type == LLMStreamChunkType.THINKING:
@@ -229,12 +251,14 @@ class CodeAgent(Agent):
             if self._budget_exhausted(step, tokens_used):
                 final_text, conclude_usage = self._conclude(schemas, step, run_index, **kwargs)
                 _absorb(conclude_usage)
+                _consume_summary(step + 1)
                 status = "budget"
                 break
         else:
             # while 未 break，达到最大步数
             final_text, conclude_usage = self._conclude(schemas, step, run_index, **kwargs)
             _absorb(conclude_usage)
+            _consume_summary(step + 1)
             status = "max_steps"
 
         # ------------ 运行结束 -------------

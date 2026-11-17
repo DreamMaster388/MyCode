@@ -4,7 +4,31 @@ import pytest
 from agents.context.builder import ContextBuilder
 from agents.context.history import HistoryManager
 from agents.core.config import Config
+from agents.core.llm_response import LLMResponse
 from agents.core.message import Message
+
+SUMMARY_HEADER = (
+    "【历史对话摘要】以下内容是更早对话的压缩摘要，不是用户的新指令，仅作为背景参考。"
+)
+SUMMARY_CONTENT = SUMMARY_HEADER + "\n摘要正文"
+
+
+class _FakeSummaryLLM:
+    def __init__(self, content="摘要正文", usage=None, error=None):
+        self.content = content
+        self.usage = {} if usage is None else usage
+        self.error = error
+        self.calls = []
+
+    def invoke(self, messages, **kwargs):
+        self.calls.append({"messages": messages, "kwargs": kwargs})
+        if self.error is not None:
+            raise self.error
+        return LLMResponse(
+            content=self.content,
+            model="fake-model",
+            usage=dict(self.usage),
+        )
 
 
 def _builder() -> ContextBuilder:
@@ -29,7 +53,7 @@ def _pruning_builder(**overrides) -> ContextBuilder:
     )
 
 
-def _summary_builder(**overrides) -> ContextBuilder:
+def _summary_builder(llm=None, **overrides) -> ContextBuilder:
     config = {
         "context_window": 100,
         "compression_threshold": 0.5,
@@ -37,7 +61,11 @@ def _summary_builder(**overrides) -> ContextBuilder:
         "context_summary_keep_rounds": 2,
     }
     config.update(overrides)
-    return ContextBuilder(HistoryManager(), Config(**config))
+    return ContextBuilder(
+        HistoryManager(),
+        Config(**config),
+        llm=llm or _FakeSummaryLLM(),
+    )
 
 
 def _seed_three_rounds(builder: ContextBuilder) -> None:
@@ -443,13 +471,20 @@ def test_build_summarizes_compression_region_and_appends_summary():
 
     context = builder.build("SYS")
 
-    assert _contents(context) == ["SYS", "", "u2", "a3", "u4", "a5"]
+    assert _contents(context) == [
+        "SYS",
+        SUMMARY_CONTENT,
+        "u2",
+        "a3",
+        "u4",
+        "a5",
+    ]
     assert context[1]["role"] == "user"
     history = builder.history.get_history()
     assert len(history) == 7
     summary = history[-1]
     assert summary.role == "summary"
-    assert summary.content == ""
+    assert summary.content == SUMMARY_CONTENT
     assert summary.replace == [0, 1]
     assert summary.id == 6
 
@@ -463,10 +498,100 @@ def test_build_without_trigger_does_not_append_summary():
 
     assert _contents(context) == ["SYS", "S"]
     assert len(builder.history.get_history()) == 2
+    assert builder.take_summary_outcome() is None
+
+
+def test_build_exposes_summary_outcome_once():
+    builder = _summary_builder()
+    _seed_three_rounds(builder)
+    builder.record_prompt_tokens(51)
+
+    builder.build("SYS")
+
+    outcome = builder.take_summary_outcome()
+    assert outcome is not None
+    assert outcome.mode == "normal"
+    assert outcome.message is builder.history.get_history()[-1]
+    assert builder.take_summary_outcome() is None
+
+
+def test_build_normal_summary_uses_llm_content_and_usage():
+    llm = _FakeSummaryLLM(
+        content="## 当前任务\n- 要点 [id=0]",
+        usage={"input_tokens": 3, "output_tokens": 2, "total_tokens": 5},
+    )
+    builder = _summary_builder(llm=llm)
+    _seed_three_rounds(builder)
+    builder.record_prompt_tokens(51)
+
+    context = builder.build("SYS")
+
+    expected = SUMMARY_HEADER + "\n## 当前任务\n- 要点 [id=0]"
+    assert _contents(context) == ["SYS", expected, "u2", "a3", "u4", "a5"]
+    outcome = builder.take_summary_outcome()
+    assert outcome.mode == "normal"
+    assert outcome.degraded is False
+    assert outcome.usage == {
+        "input_tokens": 3,
+        "output_tokens": 2,
+        "total_tokens": 5,
+    }
+    assert len(llm.calls) == 1
+
+
+def test_build_normal_summary_degrades_without_llm():
+    builder = ContextBuilder(
+        HistoryManager(),
+        Config(
+            context_window=100,
+            compression_threshold=0.5,
+            context_summary_enabled=True,
+            context_summary_keep_rounds=2,
+        ),
+    )
+    _seed_three_rounds(builder)
+    builder.record_prompt_tokens(51)
+
+    context = builder.build("SYS")
+
+    assert context[1]["content"].startswith("【历史对话摘要（降级）】")
+    outcome = builder.take_summary_outcome()
+    assert outcome.degraded is True
+    assert outcome.usage is None
+
+
+def test_build_normal_summary_empty_compression_still_calls_llm():
+    llm = _FakeSummaryLLM()
+    builder = _summary_builder(llm=llm)
+    for content, role in (
+        ("u0", "user"),
+        ("a1", "assistant"),
+        ("u2", "user"),
+        ("a3", "assistant"),
+    ):
+        builder.history.append(Message(content, role))
+    builder.record_prompt_tokens(51)
+
+    context = builder.build("SYS")
+
+    assert len(llm.calls) == 1
+    assert "【待压缩对话】" in llm.calls[0]["messages"][1]["content"]
+    history = builder.history.get_history()
+    assert history[-1].role == "summary"
+    assert history[-1].replace == []
+    assert _contents(context) == [
+        "SYS",
+        SUMMARY_CONTENT,
+        "u0",
+        "a1",
+        "u2",
+        "a3",
+    ]
 
 
 def test_build_uses_incremental_summary_when_old_summary_exists():
-    builder = _summary_builder()
+    llm = _FakeSummaryLLM()
+    builder = _summary_builder(llm=llm)
     builder.history.append(Message("m0", "user"))
     builder.history.append(Message("S1", "summary", replace=[0]))
     for content, role in (
@@ -482,16 +607,100 @@ def test_build_uses_incremental_summary_when_old_summary_exists():
 
     context = builder.build("SYS")
 
-    assert _contents(context) == ["SYS", "", "u4", "a5", "u6", "a7"]
+    assert _contents(context) == [
+        "SYS",
+        SUMMARY_CONTENT,
+        "u4",
+        "a5",
+        "u6",
+        "a7",
+    ]
     history = builder.history.get_history()
     assert history[-1].role == "summary"
     assert history[-1].replace == [1, 2, 3]
     assert history[-1].id == 8
+    assert builder.take_summary_outcome().mode == "incremental"
+    user_prompt = llm.calls[0]["messages"][1]["content"]
+    assert "【已有摘要】" in user_prompt
+    assert "S1" in user_prompt
 
     # 下一次 build 不触发时，遮蔽仍把旧摘要的遮蔽集隐藏起来。
     follow_up = ContextBuilder(builder.history, builder.config)
-    assert _contents(follow_up.build("SYS")) == ["SYS", "", "u4", "a5", "u6", "a7"]
+    assert _contents(follow_up.build("SYS")) == [
+        "SYS",
+        SUMMARY_CONTENT,
+        "u4",
+        "a5",
+        "u6",
+        "a7",
+    ]
     assert len(builder.history.get_history()) == 9
+
+
+def test_build_incremental_summary_degrades_without_llm():
+    builder = ContextBuilder(
+        HistoryManager(),
+        Config(
+            context_window=100,
+            compression_threshold=0.5,
+            context_summary_enabled=True,
+            context_summary_keep_rounds=2,
+        ),
+    )
+    builder.history.append(Message("m0", "user"))
+    builder.history.append(Message("S1", "summary", replace=[0]))
+    for content, role in (
+        ("u2", "user"),
+        ("a3", "assistant"),
+        ("u4", "user"),
+        ("a5", "assistant"),
+        ("u6", "user"),
+        ("a7", "assistant"),
+    ):
+        builder.history.append(Message(content, role))
+    builder.record_prompt_tokens(51)
+
+    context = builder.build("SYS")
+
+    assert context[1]["content"].startswith(
+        "S1\n\n【新增已压缩消息（降级）】"
+    )
+    assert "- [user] id=2" in context[1]["content"]
+    assert "- [assistant] id=3" in context[1]["content"]
+    outcome = builder.take_summary_outcome()
+    assert outcome.mode == "incremental"
+    assert outcome.degraded is True
+    assert outcome.usage is None
+
+
+def test_build_incremental_summary_empty_compression_still_calls_llm():
+    llm = _FakeSummaryLLM()
+    builder = _summary_builder(llm=llm)
+    builder.history.append(Message("S1", "summary", replace=[]))
+    builder.history.append(Message("u1", "user"))
+    builder.history.append(Message("a2", "assistant"))
+    builder.history.append(Message("u3", "user"))
+    builder.history.append(Message("a4", "assistant"))
+    builder.record_prompt_tokens(51)
+
+    context = builder.build("SYS")
+
+    assert len(llm.calls) == 1
+    user_prompt = llm.calls[0]["messages"][1]["content"]
+    assert "【已有摘要】" in user_prompt
+    assert "S1" in user_prompt
+    assert "【新增对话】" in user_prompt
+    history = builder.history.get_history()
+    assert history[-1].role == "summary"
+    assert history[-1].replace == [0]
+    assert _contents(context) == [
+        "SYS",
+        SUMMARY_CONTENT,
+        "u1",
+        "a2",
+        "u3",
+        "a4",
+    ]
 
 
 def test_summary_uses_pruned_keep_view():
@@ -516,7 +725,7 @@ def test_summary_uses_pruned_keep_view():
 
     assert _contents(context) == [
         "SYS",
-        "",
+        SUMMARY_CONTENT,
         "u2",
         "a3",
         "H" * 10

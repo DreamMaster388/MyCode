@@ -2,7 +2,7 @@
 
 职责：
 - 组装 system 提示词、历史消息和临时消息。
-- 截断、摘要、历史召回三个上下文治理模块的编排入口；截断与摘要已实现（摘要内容为空占位），历史召回仍为空。
+- 截断、摘要、历史召回三个上下文治理模块的编排入口；截断与摘要已实现，历史召回仍为空。
 """
 
 from typing import Any, Dict, List, Optional
@@ -11,17 +11,24 @@ from ..core.config import Config
 from ..core.message import Message
 from .history import HistoryManager
 from .pruner import ContextPruner
-from .summary import ContextSummarizer
+from .summary import ContextSummarizer, SummaryOutcome
 
 
 class ContextBuilder:
     """从 HistoryManager 的原始记录构建发送给 LLM 的消息列表。"""
 
-    def __init__(self, history: HistoryManager, config: Config):
+    def __init__(
+        self,
+        history: HistoryManager,
+        config: Config,
+        llm=None,
+    ):
         self.history = history
         self.config = config
         self.pruner = ContextPruner(config)
-        self.summarizer = ContextSummarizer(config)
+        self.summarizer = ContextSummarizer(config, llm)
+        # 最近一次 build 触发的摘要结果；由调用方消费一次后清空
+        self._last_summary_outcome: Optional[SummaryOutcome] = None
         # 大模型侧返回的真实输入 token 数（覆盖 history[0, _history_token_count_idx)）
         self._history_token_count = 0
         # 上述 token 数对应的历史区间右边界
@@ -44,6 +51,7 @@ class ContextBuilder:
             发送给 LLM 的消息字典列表。
         """
         self._sync_token_state()
+        self._last_summary_outcome = None
 
         messages = self.history.get_history()
         truncate = self.config.context_truncation_enabled
@@ -57,13 +65,14 @@ class ContextBuilder:
             if self.should_summarize():
                 selected, keep = self.summarizer.select_summary_region(messages)
                 if selected and selected[0].role == "summary":
-                    summary = self.summarizer.summarize_incremental(
+                    outcome = self.summarizer.summarize_incremental(
                         selected[0], selected[1:]
                     )
                 else:
-                    summary = self.summarizer.summarize(selected)
-                self.history.append(summary)
-                messages = [summary] + keep
+                    outcome = self.summarizer.summarize(selected)
+                self.history.append(outcome.message)
+                self._last_summary_outcome = outcome
+                messages = [outcome.message] + keep
         if recall:
             pass  # TODO: 对 messages 做历史召回
         if not summarize:
@@ -78,6 +87,15 @@ class ContextBuilder:
         if extra_messages:
             context.extend(extra_messages)
         return context
+
+    def take_summary_outcome(self) -> Optional[SummaryOutcome]:
+        """取出最近一次 build 触发的摘要结果，并清空。
+
+        未触发摘要时返回 None；同一结果只能取一次，避免调用方重复记账。
+        """
+        outcome = self._last_summary_outcome
+        self._last_summary_outcome = None
+        return outcome
 
     # -------------------- token 计量 --------------------
 
