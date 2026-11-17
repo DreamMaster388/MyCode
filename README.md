@@ -145,11 +145,12 @@ Bash 不进入逐次审批，因为每次执行都弹窗会失去交互价值；
 
 ### 3. 上下文管理体系
 
-编码任务往往持续几十轮，上下文管理直接决定 Agent 能否稳定工作。当前上下文体系由 history（原始记录与摘要）、builder（组装）和三个上下文治理模块（截断、摘要、历史召回）组成；截断已实现，摘要与历史召回仍为空实现，历史召回仅保留开关。
+编码任务往往持续几十轮，上下文管理直接决定 Agent 能否稳定工作。当前上下文体系由 history（原始记录与摘要）、builder（组装）和三个上下文治理模块（截断、摘要、历史召回）组成；截断与摘要已实现，历史召回仍为空实现，仅保留开关。
 
 - **历史只追加**：消息按顺序追加并分配稳定 id，不原地修改，便于回放、序列化和缓存；
 - **Token 计量**：builder 用模型返回的真实输入 token 校准历史基线，未计量部分做增量估算；
-- **上下文治理模块**：截断、摘要、历史召回分别由三个开关控制，默认全关；截断已实现，摘要与历史召回仍为空实现。三开关全关时，直接发送历史并丢弃 summary 消息，不做溢出检查；
+- **上下文治理模块**：截断、摘要、历史召回分别由三个开关控制，默认全关；截断与摘要已实现，历史召回仍为空实现。三开关全关时，直接发送历史并丢弃 summary 消息，不做溢出检查；
+- **摘要**：开启后按 token 阈值触发；先在裁剪视图上按摘要的 `replace` 遮蔽消息并把摘要前插，再保留最近 `context_summary_keep_rounds`（默认 10）轮，把更早的摘要与压缩区生成一条 content 为空的新摘要 append 进 history；`replace` 记录本次直接遮蔽的消息 id 完整列表；保留区未达上限就触发压缩的情况本轮未处理；
 - **工具输出**：工具结果全文进入历史、不落盘；发送前由 pruner 对最近轮内的超长工具输出保留头尾、对更早轮次整体替换为 marker，且只在结果更短时替换，history 原文不变；
 - **可观测性**：每轮模型输出、工具调用与结果写入 trace，便于复盘失败路径。
 
@@ -329,12 +330,12 @@ python -m pytest test/
 | 文件 | 改动内容 |
 | --- | --- |
 | `agents/core/agent.py` | 接入 `ModeGuard`；接入 `HistoryManager` 与 `ContextBuilder`；移除工具输出截断组件 |
-| `agents/core/config.py` | 三个上下文治理模块开关、窗口/阈值与裁剪参数配置；删除旧摘要/截断配置 |
-| `agents/core/message.py` | 增加历史 id、`tool_call_id`、`tool_calls`、摘要 `replace` 区间，以及 LLM 字典互转 |
+| `agents/core/config.py` | 三个上下文治理模块开关、窗口/阈值、裁剪参数与摘要保留轮数配置；删除旧摘要/截断配置 |
+| `agents/core/message.py` | 增加历史 id、`tool_call_id`、`tool_calls`、摘要 `replace` 完整 id 列表，以及 LLM 字典互转 |
 | `agents/context/history.py` | 重构为只追加历史存储；token 计量迁到 builder，摘要/上下文组装迁出 |
-| `agents/context/builder.py` | 重写为 `ContextBuilder`：上下文组装、token 计量、截断已接入，摘要/召回占位 |
+| `agents/context/builder.py` | 重写为 `ContextBuilder`：上下文组装、token 计量、截断与摘要已接入，召回占位 |
 | `agents/context/pruner.py` | 裁剪模块：按轮次和字符阈值裁剪工具消息，不改写 history |
-| `agents/context/summary.py` | 新增摘要模块；本轮空实现 |
+| `agents/context/summary.py` | 摘要模块：遮蔽、选区与普通/增量摘要消息；content 本轮为空占位 |
 | `agents/context/truncator.py` | 删除；工具结果全文进入历史 |
 | `agents/context/token_counter.py` | 删除；Token 计量职责已迁入 `ContextBuilder` |
 | `agents/core/llm.py` | 新增带工具调用的流式接口 |

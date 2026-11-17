@@ -2,7 +2,7 @@
 
 职责：
 - 组装 system 提示词、历史消息和临时消息。
-- 截断、摘要、历史召回三个上下文治理模块的编排入口；截断已实现，摘要与历史召回仍为空。
+- 截断、摘要、历史召回三个上下文治理模块的编排入口；截断与摘要已实现（摘要内容为空占位），历史召回仍为空。
 """
 
 from typing import Any, Dict, List, Optional
@@ -11,6 +11,7 @@ from ..core.config import Config
 from ..core.message import Message
 from .history import HistoryManager
 from .pruner import ContextPruner
+from .summary import ContextSummarizer
 
 
 class ContextBuilder:
@@ -20,6 +21,7 @@ class ContextBuilder:
         self.history = history
         self.config = config
         self.pruner = ContextPruner(config)
+        self.summarizer = ContextSummarizer(config)
         # 大模型侧返回的真实输入 token 数（覆盖 history[0, _history_token_count_idx)）
         self._history_token_count = 0
         # 上述 token 数对应的历史区间右边界
@@ -51,7 +53,17 @@ class ContextBuilder:
         if truncate:
             messages = self.pruner.prune(messages)
         if summarize:
-            pass  # TODO: 对 messages 做摘要压缩
+            messages = self.summarizer.apply_summary_masking(messages)
+            if self.should_summarize():
+                selected, keep = self.summarizer.select_summary_region(messages)
+                if selected and selected[0].role == "summary":
+                    summary = self.summarizer.summarize_incremental(
+                        selected[0], selected[1:]
+                    )
+                else:
+                    summary = self.summarizer.summarize(selected)
+                self.history.append(summary)
+                messages = [summary] + keep
         if recall:
             pass  # TODO: 对 messages 做历史召回
         if not summarize:
@@ -91,8 +103,8 @@ class ContextBuilder:
         self._history_token_count_idx = len(self.history.get_history())
         self._history_revision = self.history.revision
 
-    def should_compress(self) -> bool:
-        """已计量真实 token + 未计量尾部估算是否超过窗口 × 阈值。"""
+    def should_summarize(self) -> bool:
+        """是否需要摘要：已计量 token + 未计量尾部估算超过窗口 × 阈值。"""
         self._sync_token_state()
         total = self._history_token_count
         history = self.history.get_history()
