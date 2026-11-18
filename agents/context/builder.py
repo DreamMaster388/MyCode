@@ -29,6 +29,8 @@ class ContextBuilder:
         self.summarizer = ContextSummarizer(config, llm)
         # 最近一次 build 触发的摘要结果；由调用方消费一次后清空
         self._last_summary_outcome: Optional[SummaryOutcome] = None
+        # 最近一次 build 返回列表的逐条类别标注；由调用方消费一次后清空
+        self._last_context_labels: List[str] = []
         # 大模型侧返回的真实输入 token 数（覆盖 history[0, _history_token_count_idx)）
         self._history_token_count = 0
         # 上述 token 数对应的历史区间右边界
@@ -52,6 +54,7 @@ class ContextBuilder:
         """
         self._sync_token_state()
         self._last_summary_outcome = None
+        self._last_context_labels = []
 
         messages = self.history.get_history()
         truncate = self.config.context_truncation_enabled
@@ -77,13 +80,40 @@ class ContextBuilder:
             messages = [message for message in messages if message.role != "summary"]
 
         context: List[Dict[str, Any]] = []
+        labels: List[str] = []
         if system_prompt:
             context.append({"role": "system", "content": system_prompt})
+            labels.append("system")
         for message in messages:
             context.append(message.to_llm_dict())
+            labels.append(self._category_for(message))
         if extra_messages:
             context.extend(extra_messages)
+            labels.extend(["conclude_instruction"] * len(extra_messages))
+        self._last_context_labels = labels
         return context
+
+    @staticmethod
+    def _category_for(message: Message) -> str:
+        """把发送视图中的一条消息映射到类别；summary 必须独立于 user。"""
+        if message.role == "summary":
+            return "summary_message"
+        if message.role == "tool":
+            return "tool_result"
+        if message.role == "assistant":
+            return "assistant"
+        if message.role == "system":
+            return "system"
+        return "user"
+
+    def take_context_labels(self) -> List[str]:
+        """取出最近一次 build 的逐条类别标注，并清空。
+
+        返回列表与 build() 的返回值一一对应；未 build 或已取过时返回空列表。
+        """
+        labels = self._last_context_labels
+        self._last_context_labels = []
+        return labels
 
     def take_summary_outcome(self) -> Optional[SummaryOutcome]:
         """取出最近一次 build 触发的摘要结果，并清空。

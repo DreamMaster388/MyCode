@@ -27,6 +27,7 @@ from .swebench_io import (
     load_instances,
     select_instances,
 )
+from .usage_summary import format_context_usage, summarize_context_usage
 
 
 def prepull_images(instances: list[dict], pull_timeout: int = 7200) -> None:
@@ -182,6 +183,8 @@ def main() -> None:
           f"缓存 {avg['cached_tokens']:.0f}  请求 {avg['llm_requests']:.1f}  "
           f"耗时 {avg['duration_seconds']:.1f}s  费用 {avg['total_cost']:.4f} 元")
     print(f"tests 执行次数合计: {test_runs}")
+    for line in format_context_usage(summarize_context_usage(results)):
+        print(line)
 
 
 if __name__ == "__main__":

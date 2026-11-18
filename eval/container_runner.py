@@ -25,6 +25,7 @@ from agents.tools.registry import ToolRegistry
 from .container_tools import build_container_tools
 from .docker_sandbox import CONTAINER_WORKDIR, DockerSandbox
 from .swebench_io import eval_activation_prefix, image_for
+from .usage_summary import empty_context_usage
 
 DEFAULT_MODEL_NAME = os.environ.get("LLM_MODEL_ID", "codeagent")
 
@@ -202,6 +203,7 @@ def run_instance(
         "duration_seconds": 0.0,
         "final_text": "",
         "error": "",
+        "context_usage": empty_context_usage(),
         "diagnostics": {"path_guard": path_guard, "cache_hit_available": False},
     }
 
@@ -243,6 +245,7 @@ def run_instance(
                     "input_tokens": input_tokens,
                     "output_tokens": output_tokens,
                     "cached_tokens": cached_tokens,
+                    "context_usage": meta.get("context_usage") or empty_context_usage(),
                     # 请求次数与 total_steps 同源：stream_run 每轮 step 一次模型调用。
                     "llm_requests": int(meta.get("total_steps", 0) or 0),
                     "total_cost": round(estimate_cost(input_tokens, output_tokens, cached_tokens), 6),

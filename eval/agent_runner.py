@@ -27,6 +27,7 @@ from agents.tools.builtin import (
     WriteTool,
 )
 from agents.tools.registry import ToolRegistry
+from .usage_summary import empty_context_usage
 
 
 # 面向"仓库内改代码"的简洁系统提示
@@ -95,4 +96,5 @@ def run_agent(workdir: str, problem: str, max_steps: int = 25) -> Dict:
         "steps": meta.get("total_steps", 0),
         "tokens": meta.get("total_tokens", 0),
         "duration_seconds": meta.get("duration_seconds", 0.0),
+        "context_usage": meta.get("context_usage") or empty_context_usage(),
     }

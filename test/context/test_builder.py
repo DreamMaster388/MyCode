@@ -120,6 +120,41 @@ def test_all_switches_off_drops_summary_messages():
     assert _contents(builder.build("SYS")) == ["SYS", "m0"]
 
 
+def test_build_labels_match_sent_view():
+    builder = _builder()
+    builder.history.append(Message("u", "user"))
+    builder.history.append(Message("a", "assistant"))
+    builder.history.append(Message("t", "tool", tool_call_id="c1"))
+
+    context = builder.build("SYS")
+    labels = builder.take_context_labels()
+
+    assert labels == ["system", "user", "assistant", "tool_result"]
+    assert len(labels) == len(context)
+    assert builder.take_context_labels() == []
+
+
+def test_build_labels_follow_pruned_view():
+    builder = ContextBuilder(
+        HistoryManager(),
+        Config(
+            context_truncation_enabled=True,
+            context_truncation_rounds=0,
+            context_truncation_threshold=100,
+            context_truncation_head_chars=10,
+            context_truncation_tail_chars=5,
+        ),
+    )
+    builder.history.append(Message("x" * 100, "tool", tool_call_id="c1"))
+
+    context = builder.build()
+    labels = builder.take_context_labels()
+
+    assert labels == ["tool_result"]
+    assert "已裁剪" in context[0]["content"]
+    assert context[0]["content"] != "x" * 100
+
+
 def test_all_switches_off_does_not_warn(capsys):
     builder = _builder()
     builder.history.append(Message("u", "user"))
