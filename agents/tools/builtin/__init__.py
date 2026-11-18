@@ -10,6 +10,7 @@ HelloAgents框架的内置工具集合，包括：
 - DevLogTool: 开发日志工具（决策记录）
 - TaskTool: 子代理工具
 - SkillTool: 技能加载工具
+- RecallTool: 历史召回工具
 """
 
 from .calculator import CalculatorTool
@@ -21,6 +22,7 @@ from .skill_tool import SkillTool
 from .bash_tool import BashTool
 from .grep_tool import GrepTool
 from .glob_tool import GlobTool
+from .recall_tool import RecallTool
 
 __all__ = [
     "CalculatorTool",
@@ -39,5 +41,6 @@ __all__ = [
     "SkillTool",
     "BashTool",
     "GrepTool",
-    "GlobTool"
+    "GlobTool",
+    "RecallTool"
 ]
