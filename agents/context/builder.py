@@ -2,7 +2,7 @@
 
 职责：
 - 组装 system 提示词、历史消息和临时消息。
-- 截断、摘要、历史召回三个上下文治理模块的编排入口；截断与摘要已实现，历史召回仍为空。
+- 截断、摘要两个上下文治理模块的编排入口；历史召回改由 Recall 工具承担。
 """
 
 from typing import Any, Dict, List, Optional
@@ -56,7 +56,6 @@ class ContextBuilder:
         messages = self.history.get_history()
         truncate = self.config.context_truncation_enabled
         summarize = self.config.context_summary_enabled
-        recall = self.config.context_recall_enabled
 
         if truncate:
             messages = self.pruner.prune(messages)
@@ -73,8 +72,6 @@ class ContextBuilder:
                 self.history.append(outcome.message)
                 self._last_summary_outcome = outcome
                 messages = [outcome.message] + keep
-        if recall:
-            pass  # TODO: 对 messages 做历史召回
         if not summarize:
             # 如果没有启用摘要，则删除历史中的摘要信息，这个分支只会在会话配置中途改变时触发
             messages = [message for message in messages if message.role != "summary"]

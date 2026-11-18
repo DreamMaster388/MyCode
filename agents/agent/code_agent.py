@@ -57,6 +57,12 @@ class CodeAgent(Agent):
         self.max_run_tokens = max_run_tokens
         self._run_index = 0
 
+        # 历史召回：开关打开时把 Recall 工具交给模型
+        if self.config.context_recall_enabled and self.tool_registry:
+            from ..tools.builtin.recall_tool import RecallTool
+
+            self.tool_registry.register_tool(RecallTool(self.history_manager))
+
     # ------------- 主循环 -------------
     def run(self, input_text: str, **kwargs) -> str:
         """ 运行 CodeAgent（非流式兼容入口，内部消费 stream_run）"""
