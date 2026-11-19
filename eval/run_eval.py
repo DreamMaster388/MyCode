@@ -11,6 +11,7 @@ import tempfile
 from pathlib import Path
 
 from .harness import run_instance, write_jsonl
+from .usage_summary import format_context_usage, summarize_context_usage
 
 
 def load_instances(instances_dir: str) -> list[dict]:
@@ -66,6 +67,8 @@ def main() -> None:
     print(f"Resolved: {resolved}/{len(records)}")
     print(f"平均步数: {avg_steps:.1f}")
     print(f"平均耗时: {avg_time:.2f}s")
+    for line in format_context_usage(summarize_context_usage(records)):
+        print(line)
 
 
 if __name__ == "__main__":

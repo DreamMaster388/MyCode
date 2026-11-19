@@ -8,6 +8,7 @@ from ..core.llm_response import LLMStreamChunkType, ToolCall
 from ..core.message import Message
 from ..core.streaming import StreamEvent, StreamEventType
 from ..core.lifecycle import LifecycleHook
+from ..context.usage import ContextUsageTracker
 
 
 DEFAULT_CODEC_SYSTEM_PROMPT = (
@@ -56,6 +57,7 @@ class CodeAgent(Agent):
         self.max_steps = max_steps
         self.max_run_tokens = max_run_tokens
         self._run_index = 0
+        self._usage_tracker = ContextUsageTracker()
 
         # 历史召回：开关打开时把 Recall 工具交给模型
         if self.config.context_recall_enabled and self.tool_registry:
@@ -88,6 +90,7 @@ class CodeAgent(Agent):
         self._run_index += 1
         run_index = self._run_index
         session_started = datetime.now()
+        self._usage_tracker = ContextUsageTracker()
 
         schemas = self._build_tool_schemas()
 
@@ -131,6 +134,7 @@ class CodeAgent(Agent):
             if outcome is None:
                 return
             _absorb(outcome.usage)
+            self._usage_tracker.record_summary_call(outcome.usage)
             self._log(
                 "summary",
                 {
@@ -157,6 +161,8 @@ class CodeAgent(Agent):
             # 1) 调用 LLM（Function Calling）：上下文每次由 builder 构建
             try:
                 request_messages = self.context_builder.build(self.system_prompt)
+                labels = self.context_builder.take_context_labels()
+                self._usage_tracker.begin_request(request_messages, labels, schemas)
                 _consume_summary(step)
                 for chunk in self.llm.stream_invoke_with_tools(
                     messages=request_messages,
@@ -172,6 +178,7 @@ class CodeAgent(Agent):
                         final_calls = chunk.tool_calls or []
                         usage = chunk.usage or {}
             except Exception as e:
+                self._usage_tracker.abort_request()
                 final_text = f"[出错] LLM 调用失败：{e}"
                 status = "error"
                 break
@@ -186,6 +193,11 @@ class CodeAgent(Agent):
             prompt_tokens = (usage or {}).get("prompt_tokens")
             if isinstance(prompt_tokens, int) and prompt_tokens > 0:
                 self.context_builder.record_prompt_tokens(prompt_tokens)
+                self._usage_tracker.commit_request(prompt_tokens)
+            else:
+                self._usage_tracker.commit_request(None)
+            for tool_call in final_calls:
+                self._usage_tracker.count_tool_call(tool_call.name)
 
             self._log("model_output", {
                 "content": content,
@@ -270,6 +282,7 @@ class CodeAgent(Agent):
         # ------------ 运行结束 -------------
         # 保存到历史：final_text 是本次运行的最后一条消息（id 最后）
         self._record_llm_message({"role": "assistant", "content": final_text})
+        self._session_metadata["context_usage"] = self._usage_tracker.to_dict()
         self._session_metadata["total_steps"] = step
         self._session_metadata["total_tokens"] = tokens_used
         self._session_metadata["input_tokens"] = input_tokens
@@ -321,9 +334,19 @@ class CodeAgent(Agent):
             self.system_prompt,
             extra_messages=[{"role": "user", "content": self._CONCLUDE_INSTRUCTION}],
         )
+        labels = self.context_builder.take_context_labels()
+
+        def _commit(resp) -> Dict[str, Any]:
+            usage = resp.usage or {}
+            prompt_tokens = usage.get("prompt_tokens")
+            self._usage_tracker.commit_request(
+                prompt_tokens if isinstance(prompt_tokens, int) else None
+            )
+            return usage
 
         # 主通道：保留工具但强制 tool_choice="none"
         if schemas:
+            self._usage_tracker.begin_request(final_messages, labels, schemas)
             try:
                 resp = self.llm.invoke_with_tools(
                     messages=final_messages, tools=schemas,
@@ -331,26 +354,30 @@ class CodeAgent(Agent):
                 )
                 text = (resp.content or "").strip()
                 if text:
+                    usage = _commit(resp)
                     self._log("model_output", {
-                        "content": text, "tool_calls": 0, "usage": resp.usage or {},
+                        "content": text, "tool_calls": 0, "usage": usage,
                     }, step=step + 1, run=run_index)
-                    return text, (resp.usage or {})
+                    return text, usage
             except Exception:
                 pass
 
         # 降级：无工具/不支持 none 时用普通 invoke
+        self._usage_tracker.begin_request(final_messages, labels, None)
         try:
             resp = self.llm.invoke(final_messages, **kwargs)
             text = (resp.content or "").strip()
             if text:
+                usage = _commit(resp)
                 self._log("model_output", {
-                    "content": text, "tool_calls": 0, "usage": resp.usage or {},
+                    "content": text, "tool_calls": 0, "usage": usage,
                 }, step=step + 1, run=run_index)
-                return text, (resp.usage or {})
+                return text, usage
         except Exception:
             pass
 
         # 确定性兜底（主/降级通道都失败，没有真实调用，不产生 usage）
+        self._usage_tracker.abort_request()
         fallback = f"[已达到最大步数 max_steps={self.max_steps}，请告诉我是否继续。]"
         return fallback, None
 

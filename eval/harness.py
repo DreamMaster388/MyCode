@@ -12,6 +12,7 @@ from typing import Dict, Optional
 
 from .agent_runner import run_agent
 from .judge import judge, parse_test_results
+from .usage_summary import empty_context_usage
 
 INSTANCE_ID = "instance_id"
 REPO_URL = "repo_url"
@@ -80,6 +81,7 @@ def run_instance(instance: Dict, workspace: str, out_dir: str, max_steps: int = 
             "status": "error",
             "resolved": False,
             "final_text": f"[eval] agent error: {exc}",
+            "context_usage": empty_context_usage(),
         }
 
     # 1) 提取模型补丁（含新增文件）
@@ -133,6 +135,7 @@ def run_instance(instance: Dict, workspace: str, out_dir: str, max_steps: int = 
         "steps": agent_result["steps"],
         "tokens": agent_result["tokens"],
         "duration_seconds": round(agent_result["duration_seconds"], 3),
+        "context_usage": agent_result.get("context_usage") or empty_context_usage(),
         "final_text": agent_result["final_text"][:2000],
     }
 
