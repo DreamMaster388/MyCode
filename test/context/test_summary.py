@@ -117,7 +117,7 @@ def test_two_summary_chain_keeps_hidden_messages_hidden():
     assert [message.content for message in masked] == ["S2", "m2"]
 
 
-def test_select_region_without_summary_retreats_to_user():
+def test_select_region_a_greater_than_config_keeps_configured_rounds():
     messages = [
         Message("u0", "user", id=0),
         Message("a1", "assistant", id=1),
@@ -130,8 +130,23 @@ def test_select_region_without_summary_retreats_to_user():
 
     selected, keep = summarizer.select_summary_region(messages)
 
-    assert [message.content for message in selected] == ["u0", "a1"]
-    assert [message.content for message in keep] == ["u2", "a3", "u4", "a5"]
+    assert [message.content for message in selected] == ["u0", "a1", "u2"]
+    assert [message.content for message in keep] == ["a3", "u4", "a5"]
+
+
+def test_select_region_a_equal_two_yields_oldest_round():
+    messages = [
+        Message("u0", "user", id=0),
+        Message("a1", "assistant", id=1),
+        Message("u2", "user", id=2),
+        Message("a3", "assistant", id=3),
+    ]
+    summarizer = ContextSummarizer(Config(context_summary_keep_rounds=10))
+
+    selected, keep = summarizer.select_summary_region(messages)
+
+    assert [message.content for message in selected] == ["u0", "a1", "u2"]
+    assert [message.content for message in keep] == ["a3"]
 
 
 def test_select_region_with_summary_keeps_summary_in_selected():
@@ -148,11 +163,11 @@ def test_select_region_with_summary_keeps_summary_in_selected():
 
     selected, keep = summarizer.select_summary_region(messages)
 
-    assert [message.content for message in selected] == ["S", "u1", "a2"]
-    assert [message.content for message in keep] == ["u3", "a4", "u5", "a6"]
+    assert [message.content for message in selected] == ["S", "u1", "a2", "u3"]
+    assert [message.content for message in keep] == ["a4", "u5", "a6"]
 
 
-def test_select_region_without_user_before_boundary_starts_at_assistant():
+def test_select_region_without_user_before_boundary_does_not_retreat():
     messages = [
         Message("a1", "assistant", id=0),
         Message("a2", "assistant", id=1),
@@ -177,8 +192,23 @@ def test_select_region_keep_rounds_is_configurable():
 
     selected, keep = summarizer.select_summary_region(messages)
 
-    assert [message.content for message in selected] == ["u0", "a1"]
-    assert [message.content for message in keep] == ["u2", "a3"]
+    assert [message.content for message in selected] == ["u0", "a1", "u2"]
+    assert [message.content for message in keep] == ["a3"]
+
+
+def test_select_region_does_not_mutate_input():
+    messages = [
+        Message("u0", "user", id=0),
+        Message("a1", "assistant", id=1),
+        Message("u2", "user", id=2),
+        Message("a3", "assistant", id=3),
+    ]
+    snapshot = [message.to_dict() for message in messages]
+    summarizer = ContextSummarizer(Config(context_summary_keep_rounds=2))
+
+    summarizer.select_summary_region(messages)
+
+    assert [message.to_dict() for message in messages] == snapshot
 
 
 def test_summarize_without_llm_returns_degraded_outcome():

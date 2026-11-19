@@ -5,7 +5,8 @@
 - 截断、摘要两个上下文治理模块的编排入口；历史召回改由 Recall 工具承担。
 """
 
-from typing import Any, Dict, List, Optional
+import json
+from typing import Any, Dict, List, Optional, Tuple
 
 from ..core.config import Config
 from ..core.message import Message
@@ -31,10 +32,10 @@ class ContextBuilder:
         self._last_summary_outcome: Optional[SummaryOutcome] = None
         # 最近一次 build 返回列表的逐条类别标注；由调用方消费一次后清空
         self._last_context_labels: List[str] = []
-        # 大模型侧返回的真实输入 token 数（覆盖 history[0, _history_token_count_idx)）
+        # 大模型侧返回的真实输入 token 数（锚点总量）
         self._history_token_count = 0
-        # 上述 token 数对应的历史区间右边界
-        self._history_token_count_idx = 0
+        # 锚点边界：该次实际发送视图的最大消息 id；None 表示还没有锚点
+        self._history_token_count_max_id: Optional[int] = None
         # 计量对应的 history.revision；clear/load 后据此归零
         self._history_revision = history.revision
 
@@ -64,7 +65,10 @@ class ContextBuilder:
             messages = self.pruner.prune(messages)
         if summarize:
             messages = self.summarizer.apply_summary_masking(messages)
-            if self.should_summarize():
+            if (
+                self._visible_assistant_count(messages) >= 2
+                and self.should_summarize(messages, extra_messages)
+            ):
                 selected, keep = self.summarizer.select_summary_region(messages)
                 if selected and selected[0].role == "summary":
                     outcome = self.summarizer.summarize_incremental(
@@ -92,6 +96,12 @@ class ContextBuilder:
             labels.extend(["conclude_instruction"] * len(extra_messages))
         self._last_context_labels = labels
         return context
+
+    @staticmethod
+    def _visible_assistant_count(messages: List[Message]) -> int:
+        """遮蔽后的视图里可见 assistant 轮数；头部 summary 不计入。"""
+        visible = messages[1:] if messages and messages[0].role == "summary" else messages
+        return sum(1 for message in visible if message.role == "assistant")
 
     @staticmethod
     def _category_for(message: Message) -> str:
@@ -134,26 +144,81 @@ class ContextBuilder:
     def reset_token_state(self) -> None:
         """重置计量基线，使其对应当前 history。"""
         self._history_token_count = 0
-        self._history_token_count_idx = 0
+        self._history_token_count_max_id = None
         self._history_revision = self.history.revision
 
-    def estimate_message_tokens(self, message: Message) -> int:
-        """按字符数估算单条消息的 token（1 token ≈ 4 字符）。"""
-        return len(str(message)) // 4
+    @staticmethod
+    def _payload_text(payload: Dict[str, Any]) -> str:
+        """实际发送 payload 的 JSON 文本；不含 history 内部字段。"""
+        return json.dumps(payload, ensure_ascii=False)
 
     def record_prompt_tokens(self, prompt_tokens: int) -> None:
-        """用大模型返回的真实输入 token 数校准计量基线。"""
+        """用大模型返回的真实输入 token 数校准锚点。
+
+        边界取本次请求实际发送视图的最大消息 id；主循环在 build 之后、
+        追加 assistant/tool 之前调用，因此当前 history 的最大 id 即该边界。
+        """
         self._sync_token_state()
         self._history_token_count = prompt_tokens
-        self._history_token_count_idx = len(self.history.get_history())
+        self._history_token_count_max_id = max(
+            (message.id for message in self.history.get_history() if message.id is not None),
+            default=-1,
+        )
         self._history_revision = self.history.revision
 
-    def should_summarize(self) -> bool:
-        """是否需要摘要：已计量 token + 未计量尾部估算超过窗口 × 阈值。"""
+    def _estimated_tail(self, messages: List[Message], extra_messages) -> Tuple[int, int]:
+        """返回 (字符数, UTF-8 字节数)；有锚点时只统计边界之后的消息。"""
+        char_count = 0
+        byte_count = 0
+        boundary = self._history_token_count_max_id
+        for message in messages:
+            if boundary is not None and (
+                message.id is None or message.id <= boundary
+            ):
+                continue
+            text = self._payload_text(message.to_llm_dict())
+            char_count += len(text)
+            byte_count += len(text.encode("utf-8"))
+        for payload in extra_messages or []:
+            text = self._payload_text(payload)
+            char_count += len(text)
+            byte_count += len(text.encode("utf-8"))
+        return char_count, byte_count
+
+    def should_summarize(
+        self,
+        messages: Optional[List[Message]] = None,
+        extra_messages: Optional[List[Dict[str, Any]]] = None,
+    ) -> bool:
+        """是否需要摘要：锚点总量 + 尾部双估算是否超过各自阈值。
+
+        有锚点时只估算锚点边界后新增的实际视图消息与 extra；没有锚点时
+        整个视图加 extra 都按尾部估算，锚点总量按 0 计。
+        """
         self._sync_token_state()
-        total = self._history_token_count
-        history = self.history.get_history()
-        idx = min(max(self._history_token_count_idx, 0), len(history))
-        for message in history[idx:]:
-            total += self.estimate_message_tokens(message)
-        return total > self.config.context_window * self.config.compression_threshold
+        if messages is None:
+            messages = self._current_view()
+        char_count, byte_count = self._estimated_tail(messages, extra_messages)
+        char_tokens = (char_count + 3) // 4
+        byte_tokens = (byte_count + 3) // 4
+        prompt_tokens = (
+            self._history_token_count
+            if self._history_token_count_max_id is not None
+            else 0
+        )
+        return (
+            prompt_tokens + char_tokens
+            > self.config.context_window * self.config.compression_threshold
+            or prompt_tokens + byte_tokens > self.config.context_window
+        )
+
+    def _current_view(self) -> List[Message]:
+        """按当前配置生成实际发送视图（裁剪 + 摘要遮蔽）。"""
+        messages = self.history.get_history()
+        if self.config.context_truncation_enabled:
+            messages = self.pruner.prune(messages)
+        if self.config.context_summary_enabled:
+            messages = self.summarizer.apply_summary_masking(messages)
+        else:
+            messages = [message for message in messages if message.role != "summary"]
+        return messages
