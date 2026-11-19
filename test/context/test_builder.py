@@ -155,6 +155,24 @@ def test_build_labels_follow_pruned_view():
     assert context[0]["content"] != "x" * 100
 
 
+def test_build_labels_cover_summary_and_conclude_instruction():
+    builder = _summary_builder()
+    _seed_three_rounds(builder)
+    builder.record_prompt_tokens(51)
+
+    extra = [{"role": "user", "content": "收尾指令"}]
+    context = builder.build("SYS", extra_messages=extra)
+    labels = builder.take_context_labels()
+
+    assert len(labels) == len(context)
+    assert labels[0] == "system"
+    assert labels[1] == "summary_message"
+    assert labels[-1] == "conclude_instruction"
+    # 被摘要遮蔽的消息不进入发送视图
+    assert "u0" not in _contents(context)
+    assert "a1" not in _contents(context)
+
+
 def test_all_switches_off_does_not_warn(capsys):
     builder = _builder()
     builder.history.append(Message("u", "user"))

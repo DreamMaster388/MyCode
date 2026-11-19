@@ -1,13 +1,14 @@
 """ContextUsageTracker - 把每次请求的真实输入 token 按类别归集。
 
 只处理输入 token；类别合计在拿到真实 prompt_tokens 后按长度份额精确分配。
-工具区是同一批输入 token 的第二视角，按工具名合并参数与结果，不与类别区相加。
+工具区是同一批输入 token 的第二视角：从类别分配值里切出参数与结果份额，
+按工具名汇总，不与类别区相加。
 """
 
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Sequence
 
 CATEGORY_KEYS = (
@@ -70,23 +71,31 @@ def _allocate(total: int, lengths: Sequence[int]) -> List[int]:
     return allocated
 
 
+def _arguments_length(function: Dict[str, Any]) -> int:
+    """工具参数的发送长度：字符串按字符数，其余按序列化 JSON 计。"""
+    arguments = function.get("arguments")
+    if isinstance(arguments, str):
+        return len(arguments)
+    return _payload_length(arguments) if arguments is not None else 0
+
+
+@dataclass
+class _ToolCall:
+    tool_name: str
+    arguments_length: int
+
+
 @dataclass
 class _Segment:
     category: str
     length: int
-
-
-@dataclass
-class _ToolSegment:
-    tool_name: str
-    length: int
+    tool_calls: List[_ToolCall] = field(default_factory=list)
+    tool_result_name: Optional[str] = None
 
 
 @dataclass
 class _PendingRequest:
     segments: List[_Segment]
-    tool_segments: List[_ToolSegment]
-    total_length: int
 
 
 class ContextUsageTracker:
@@ -105,10 +114,9 @@ class ContextUsageTracker:
         labels: List[str],
         tools: Optional[List[Dict[str, Any]]] = None,
     ) -> None:
-        """记录一次主循环/收尾请求的类别段、长度与工具第二视角。"""
+        """记录一次主循环/收尾请求的类别段与各类别内的工具调用。"""
         self._pending = None
         segments: List[_Segment] = []
-        tool_segments: List[_ToolSegment] = []
         if tools:
             segments.append(_Segment("tool_schema", _payload_length(tools)))
 
@@ -124,32 +132,22 @@ class ContextUsageTracker:
         for index, message in enumerate(messages):
             label = labels[index] if index < len(labels) else None
             category = label if label in CATEGORY_KEYS else _category_from_message(message)
-            length = _payload_length(message)
-            segments.append(_Segment(category, length))
-
+            segment = _Segment(category, _payload_length(message))
             if category == "assistant":
-                calls = message.get("tool_calls") or []
-                if calls:
-                    raw_lengths = [_payload_length(call) for call in calls]
-                    raw_total = sum(raw_lengths)
-                    if raw_total > length and raw_total > 0:
-                        lengths = [int(item * length / raw_total) for item in raw_lengths]
-                    else:
-                        lengths = raw_lengths
-                    for tool_call, call_length in zip(calls, lengths):
-                        function = tool_call.get("function") or {}
-                        name = function.get("name") or "unknown"
-                        tool_segments.append(_ToolSegment(name, call_length))
+                for tool_call in message.get("tool_calls") or []:
+                    function = tool_call.get("function") or {}
+                    segment.tool_calls.append(
+                        _ToolCall(
+                            tool_name=function.get("name") or "unknown",
+                            arguments_length=_arguments_length(function),
+                        )
+                    )
             elif category == "tool_result":
                 call_id = message.get("tool_call_id")
-                name = self._call_names.get(call_id) or "unknown"
-                tool_segments.append(_ToolSegment(name, length))
+                segment.tool_result_name = self._call_names.get(call_id) or "unknown"
+            segments.append(segment)
 
-        self._pending = _PendingRequest(
-            segments=segments,
-            tool_segments=tool_segments,
-            total_length=sum(segment.length for segment in segments),
-        )
+        self._pending = _PendingRequest(segments=segments)
 
     def commit_request(self, prompt_tokens: Optional[int]) -> None:
         """用真实输入 token 按长度份额落账；无 usage 时只清空待处理请求。"""
@@ -157,24 +155,34 @@ class ContextUsageTracker:
         self._pending = None
         if pending is None or not isinstance(prompt_tokens, int) or prompt_tokens <= 0:
             return
-        if pending.total_length <= 0:
-            return
 
         allocations = _allocate(
             prompt_tokens, [segment.length for segment in pending.segments]
         )
         for segment, tokens in zip(pending.segments, allocations):
             self._categories[segment.category] += tokens
+            if segment.category == "assistant":
+                self._attribute_tool_parameters(segment, tokens)
+            elif segment.category == "tool_result" and segment.tool_result_name:
+                self._add_tool_tokens(segment.tool_result_name, tokens)
 
-        for segment in pending.tool_segments:
-            if segment.length <= 0:
-                continue
-            tokens = int(prompt_tokens * segment.length / pending.total_length)
-            if tokens:
-                entry = self._tools.setdefault(
-                    segment.tool_name, {"input_tokens": 0, "calls": 0}
-                )
-                entry["input_tokens"] += tokens
+    def _attribute_tool_parameters(self, segment: _Segment, tokens: int) -> None:
+        """从 assistant 段的分配值里切出参数份额，按参数长度分给各工具。"""
+        lengths = [call.arguments_length for call in segment.tool_calls]
+        total_length = sum(lengths)
+        if tokens <= 0 or total_length <= 0 or segment.length <= 0:
+            return
+        parameter_tokens = int(tokens * total_length / segment.length)
+        for call, share in zip(segment.tool_calls, _allocate(parameter_tokens, lengths)):
+            self._add_tool_tokens(call.tool_name, share)
+
+    def _add_tool_tokens(self, tool_name: str, tokens: int) -> None:
+        if tokens <= 0:
+            return
+        entry = self._tools.setdefault(
+            tool_name or "unknown", {"input_tokens": 0, "calls": 0}
+        )
+        entry["input_tokens"] += tokens
 
     def count_tool_call(self, name: str) -> None:
         """模型每发出一个 tool_call 计一次；含未知工具与参数解析失败。"""

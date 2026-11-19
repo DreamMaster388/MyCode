@@ -188,3 +188,23 @@ def test_conclude_instruction_is_its_own_category():
     assert agent._session_metadata["input_tokens"] == 150
     assert agent._session_metadata["total_steps"] == 1
     assert usage["tools"]["Noop"]["calls"] == 1
+
+
+def test_summary_triggered_by_conclude_build_is_counted():
+    llm = _SummaryLLM(
+        summary_usage=_usage(40),
+        main_usage=_usage(100),
+        main_tool_calls=[ToolCall(id="c1", name="Noop", arguments="x" * 400)],
+        conclude_usage=_usage(50),
+    )
+    agent = _agent(llm, _summary_config(), max_steps=1)
+    _seed_history(agent)
+
+    agent.run("fix it")
+    usage = agent._session_metadata["context_usage"]
+
+    assert llm.summary_calls == 1
+    assert usage["summary_calls"] == 1
+    assert usage["categories"]["summary_call"] == 40
+    assert sum(usage["categories"].values()) == 190
+    assert agent._session_metadata["input_tokens"] == 190

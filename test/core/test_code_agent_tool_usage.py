@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 from agents.agent.code_agent import CodeAgent
+from agents.context.usage import ContextUsageTracker
 from agents.core.config import Config
 from agents.core.llm_response import LLMStreamChunk, LLMStreamChunkType, ToolCall
 from agents.tools.base import Tool
@@ -151,3 +152,61 @@ def test_tool_tokens_accumulate_when_context_is_resent():
     )
 
     assert two_calls > one_call
+
+
+def _tracker_usage(messages, labels, prompt_tokens=10000):
+    tracker = ContextUsageTracker()
+    tracker.begin_request(messages, labels)
+    tracker.commit_request(prompt_tokens)
+    return tracker.to_dict()
+
+
+def test_multi_tool_call_split_follows_arguments_length():
+    usage = _tracker_usage(
+        [
+            {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [
+                    {"id": "c1", "type": "function", "function": {"name": "Bash", "arguments": "{}"}},
+                    {
+                        "id": "c2",
+                        "type": "function",
+                        "function": {"name": "Read", "arguments": "x" * 212},
+                    },
+                ],
+            }
+        ],
+        ["assistant"],
+    )
+
+    bash = usage["tools"]["Bash"]["input_tokens"]
+    read = usage["tools"]["Read"]["input_tokens"]
+    assert bash > 0
+    # arguments 长度比 2:212；按整段 call JSON 分摊时只有约 1:4
+    assert read > 50 * bash
+    assert bash + read <= usage["categories"]["assistant"]
+
+
+def test_tool_result_tokens_map_to_originating_tool():
+    def _tokens(with_result):
+        messages = [
+            {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [
+                    {"id": "c1", "type": "function", "function": {"name": "Noop", "arguments": "{}"}}
+                ],
+            }
+        ]
+        labels = ["assistant"]
+        if with_result:
+            messages.append(
+                {"role": "tool", "tool_call_id": "c1", "content": "x" * 500}
+            )
+            labels.append("tool_result")
+        usage = _tracker_usage(messages, labels)
+        assert "unknown" not in usage["tools"]
+        return usage["tools"]["Noop"]["input_tokens"]
+
+    assert _tokens(True) > _tokens(False) + 100
