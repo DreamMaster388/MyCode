@@ -802,7 +802,7 @@ def test_summary_uses_pruned_keep_view():
         context_truncation_threshold=20,
         context_truncation_head_chars=10,
         context_truncation_tail_chars=5,
-        context_summary_keep_rounds=1,
+        context_summary_keep_rounds=2,
     )
     builder.history.append(Message("u0", "user"))
     builder.history.append(Message("a1", "assistant"))
@@ -815,8 +815,18 @@ def test_summary_uses_pruned_keep_view():
 
     context = builder.build("SYS")
 
-    assert _contents(context) == ["SYS", SUMMARY_CONTENT, "a5"]
-    assert builder.history.get_history()[-1].replace == [0, 1, 2, 3, 4]
+    assert _contents(context) == [
+        "SYS",
+        SUMMARY_CONTENT,
+        "a3",
+        "H" * 10
+        + "\n"
+        + "已裁剪，详情参见记忆4中偏移10，长度35"
+        + "\n"
+        + "T" * 5,
+        "a5",
+    ]
+    assert builder.history.get_history()[-1].replace == [0, 1, 2]
     assert builder.history.get_history()[4].content == original
 
 
@@ -929,6 +939,38 @@ def test_utf8_byte_threshold_is_strict_and_triggers_on_its_own(length, expected)
     assert builder.should_summarize() is expected
 
 
+@pytest.mark.parametrize(
+    "length,expected",
+    [
+        (89, False),
+        (90, True),
+    ],
+)
+def test_anchor_plus_tail_character_estimate_triggers_strictly(length, expected):
+    builder = _token_builder()
+    builder.history.append(Message("u0", "user"))
+    _anchor_view(builder, prompt_tokens=20)
+    builder.history.append(Message("x" * length, "user"))
+
+    assert builder.should_summarize() is expected
+
+
+@pytest.mark.parametrize(
+    "length,expected",
+    [
+        (109, False),
+        (110, True),
+    ],
+)
+def test_anchor_plus_tail_utf8_byte_estimate_triggers_strictly(length, expected):
+    builder = _token_builder()
+    builder.history.append(Message("u0", "user"))
+    _anchor_view(builder, prompt_tokens=10)
+    builder.history.append(Message("中" * length, "user"))
+
+    assert builder.should_summarize() is expected
+
+
 def test_tool_call_arguments_enter_estimation():
     builder = _token_builder()
     builder.history.append(Message("u0", "user"))
@@ -961,12 +1003,21 @@ def test_extra_messages_enter_estimation():
 
 
 def test_masked_messages_are_not_reestimated():
-    builder = _token_builder()
-    builder.history.append(Message("x" * 3000, "user"))
-    builder.history.append(Message("S", "summary", replace=[0]))
-    _anchor_view(builder, prompt_tokens=45)
+    masked = _token_builder()
+    masked.history.append(Message("u0", "user"))
+    _anchor_view(masked, prompt_tokens=10)
+    masked.history.append(Message("x" * 3000, "user"))
+    masked.history.append(Message("S", "summary", replace=[1]))
 
-    assert builder.should_summarize() is False
+    assert masked.should_summarize() is False
+
+    unmasked = _token_builder()
+    unmasked.history.append(Message("u0", "user"))
+    _anchor_view(unmasked, prompt_tokens=10)
+    unmasked.history.append(Message("x" * 3000, "user"))
+    unmasked.history.append(Message("S", "summary", replace=[]))
+
+    assert unmasked.should_summarize() is True
 
 
 def test_estimation_uses_pruned_tool_view():
@@ -1015,8 +1066,10 @@ def test_clear_reestimates_whole_view_after_anchor():
     assert builder.should_summarize() is False
 
     builder.history.clear()
-    builder.history.append(Message("x" * 170, "user"))
+    builder.history.append(Message("x" * 169, "user"))
+    assert builder.should_summarize() is False
 
+    builder.history.append(Message("u1", "user"))
     assert builder.should_summarize() is True
 
 
@@ -1037,7 +1090,18 @@ def test_load_reestimates_whole_view_after_anchor():
     assert builder.should_summarize() is False
 
     builder.history.load_from_dict(
+        {
+            "history": [
+                {"role": "user", "content": "x" * 3000, "id": 0},
+                {"role": "summary", "content": "S", "id": 1, "replace": [0]},
+                {"role": "user", "content": "x" * 100, "id": 2},
+            ],
+            "next_id": 3,
+        }
+    )
+    assert builder.should_summarize() is False
+
+    builder.history.load_from_dict(
         {"history": [{"role": "user", "content": "x" * 170, "id": 0}], "next_id": 1}
     )
-
     assert builder.should_summarize() is True
