@@ -201,8 +201,10 @@ class ContextSummarizer:
     ) -> Tuple[List[Message], List[Message]]:
         """在遮蔽后的列表上返回 (摘要区间, 完整保留区)。
 
-        摘要区间 = 旧摘要（若有）+ 压缩区；完整保留区从最近 N 轮的第一条 user 起。
-        不足 N 轮时直接取倒数第 N 条 assistant，不做兜底。
+        只处理可见 assistant 数 A ≥ 2：keep = min(配置轮数, A - 1)，边界取
+        倒数第 keep 条 assistant；摘要区间 = 旧摘要（若有）+ 边界之前的可见消息，
+        保留区 = 边界到末尾。保留区可以从 assistant 开头，不回退到 user。
+        A < 2 时由 builder 拦截。
         """
         summary = messages[0] if messages and messages[0].role == "summary" else None
         visible = messages[1:] if summary else messages
@@ -211,11 +213,12 @@ class ContextSummarizer:
             for index, message in enumerate(visible)
             if message.role == "assistant"
         ]
-        boundary = assistant_indexes[-self.config.context_summary_keep_rounds]
-        for index in range(boundary, -1, -1):
-            if visible[index].role == "user":
-                boundary = index
-                break
+        keep_rounds = min(
+            self.config.context_summary_keep_rounds, len(assistant_indexes) - 1
+        )
+        if keep_rounds < 1:
+            return [], visible
+        boundary = assistant_indexes[-keep_rounds]
 
         selected = ([summary] if summary else []) + visible[:boundary]
         return selected, visible[boundary:]

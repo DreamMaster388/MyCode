@@ -203,8 +203,8 @@ def test_summary_triggered_by_conclude_build_is_counted():
     agent.run("fix it")
     usage = agent._session_metadata["context_usage"]
 
-    assert llm.summary_calls == 1
-    assert usage["summary_calls"] == 1
-    assert usage["categories"]["summary_call"] == 40
-    assert sum(usage["categories"].values()) == 190
-    assert agent._session_metadata["input_tokens"] == 190
+    assert llm.summary_calls == 2
+    assert usage["summary_calls"] == 2
+    assert usage["categories"]["summary_call"] == 80
+    assert sum(usage["categories"].values()) == 230
+    assert agent._session_metadata["input_tokens"] == 230

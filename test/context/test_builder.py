@@ -527,7 +527,6 @@ def test_build_summarizes_compression_region_and_appends_summary():
     assert _contents(context) == [
         "SYS",
         SUMMARY_CONTENT,
-        "u2",
         "a3",
         "u4",
         "a5",
@@ -538,7 +537,7 @@ def test_build_summarizes_compression_region_and_appends_summary():
     summary = history[-1]
     assert summary.role == "summary"
     assert summary.content == SUMMARY_CONTENT
-    assert summary.replace == [0, 1]
+    assert summary.replace == [0, 1, 2]
     assert summary.id == 6
 
 
@@ -580,7 +579,7 @@ def test_build_normal_summary_uses_llm_content_and_usage():
     context = builder.build("SYS")
 
     expected = SUMMARY_HEADER + "\n## 当前任务\n- 要点 [id=0]"
-    assert _contents(context) == ["SYS", expected, "u2", "a3", "u4", "a5"]
+    assert _contents(context) == ["SYS", expected, "a3", "u4", "a5"]
     outcome = builder.take_summary_outcome()
     assert outcome.mode == "normal"
     assert outcome.degraded is False
@@ -613,33 +612,74 @@ def test_build_normal_summary_degrades_without_llm():
     assert outcome.usage is None
 
 
-def test_build_normal_summary_empty_compression_still_calls_llm():
+def test_build_skips_summary_when_visible_assistants_are_below_two():
     llm = _FakeSummaryLLM()
     builder = _summary_builder(llm=llm)
-    for content, role in (
-        ("u0", "user"),
-        ("a1", "assistant"),
-        ("u2", "user"),
-        ("a3", "assistant"),
-    ):
-        builder.history.append(Message(content, role))
+    builder.history.append(Message("u0", "user"))
+    builder.history.append(Message("a1", "assistant"))
     builder.record_prompt_tokens(51)
 
     context = builder.build("SYS")
 
-    assert len(llm.calls) == 1
-    assert "【待压缩对话】" in llm.calls[0]["messages"][1]["content"]
-    history = builder.history.get_history()
-    assert history[-1].role == "summary"
-    assert history[-1].replace == []
-    assert _contents(context) == [
-        "SYS",
-        SUMMARY_CONTENT,
-        "u0",
-        "a1",
-        "u2",
-        "a3",
-    ]
+    assert builder.should_summarize() is True
+    assert llm.calls == []
+    assert len(builder.history.get_history()) == 2
+    assert builder.take_summary_outcome() is None
+    assert _contents(context) == ["SYS", "u0", "a1"]
+
+
+def test_build_skips_summary_below_two_and_keeps_old_summary_visible():
+    llm = _FakeSummaryLLM()
+    builder = _summary_builder(llm=llm)
+    builder.history.append(Message("m0", "user"))
+    builder.history.append(Message("S1", "summary", replace=[0]))
+    builder.history.append(Message("a1", "assistant"))
+    builder.record_prompt_tokens(51)
+
+    context = builder.build("SYS")
+
+    assert llm.calls == []
+    assert len(builder.history.get_history()) == 3
+    assert builder.take_summary_outcome() is None
+    assert _contents(context) == ["SYS", "S1", "a1"]
+
+
+def test_build_a_equal_two_compresses_triggering_user_and_keeps_one_round():
+    builder = _summary_builder(context_summary_keep_rounds=10)
+    builder.history.append(Message("u0", "user"))
+    builder.history.append(Message("a1", "assistant"))
+    builder.history.append(Message("u2", "user"))
+    builder.history.append(Message("a3", "assistant"))
+    builder.record_prompt_tokens(51)
+
+    context = builder.build("SYS")
+
+    assert _contents(context) == ["SYS", SUMMARY_CONTENT, "a3"]
+    summary = builder.history.get_history()[-1]
+    assert summary.replace == [0, 1, 2]
+
+
+def test_build_yields_one_round_per_trigger_until_one_round_remains():
+    builder = _summary_builder(context_summary_keep_rounds=10)
+    _seed_three_rounds(builder)
+    builder.record_prompt_tokens(51)
+
+    first = builder.build("SYS")
+
+    assert _contents(first) == ["SYS", SUMMARY_CONTENT, "a3", "u4", "a5"]
+    assert builder.history.get_history()[-1].replace == [0, 1, 2]
+
+    second = builder.build("SYS")
+
+    assert _contents(second) == ["SYS", SUMMARY_CONTENT, "a5"]
+    assert builder.history.get_history()[-1].replace == [6, 3, 4]
+
+    length_before_skip = len(builder.history.get_history())
+    third = builder.build("SYS")
+
+    assert _contents(third) == ["SYS", SUMMARY_CONTENT, "a5"]
+    assert len(builder.history.get_history()) == length_before_skip
+    assert builder.take_summary_outcome() is None
 
 
 def test_build_uses_incremental_summary_when_old_summary_exists():
@@ -663,26 +703,25 @@ def test_build_uses_incremental_summary_when_old_summary_exists():
     assert _contents(context) == [
         "SYS",
         SUMMARY_CONTENT,
-        "u4",
         "a5",
         "u6",
         "a7",
     ]
     history = builder.history.get_history()
     assert history[-1].role == "summary"
-    assert history[-1].replace == [1, 2, 3]
+    assert history[-1].replace == [1, 2, 3, 4]
     assert history[-1].id == 8
     assert builder.take_summary_outcome().mode == "incremental"
     user_prompt = llm.calls[0]["messages"][1]["content"]
     assert "【已有摘要】" in user_prompt
     assert "S1" in user_prompt
+    assert "u4" in user_prompt
 
     # 下一次 build 不触发时，遮蔽仍把旧摘要的遮蔽集隐藏起来。
     follow_up = ContextBuilder(builder.history, builder.config)
     assert _contents(follow_up.build("SYS")) == [
         "SYS",
         SUMMARY_CONTENT,
-        "u4",
         "a5",
         "u6",
         "a7",
@@ -720,13 +759,15 @@ def test_build_incremental_summary_degrades_without_llm():
     )
     assert "- [user] id=2" in context[1]["content"]
     assert "- [assistant] id=3" in context[1]["content"]
+    assert "- [user] id=4" in context[1]["content"]
+    assert _contents(context) == ["SYS", context[1]["content"], "a5", "u6", "a7"]
     outcome = builder.take_summary_outcome()
     assert outcome.mode == "incremental"
     assert outcome.degraded is True
     assert outcome.usage is None
 
 
-def test_build_incremental_summary_empty_compression_still_calls_llm():
+def test_build_incremental_summary_includes_triggering_user_in_compression():
     llm = _FakeSummaryLLM()
     builder = _summary_builder(llm=llm)
     builder.history.append(Message("S1", "summary", replace=[]))
@@ -743,15 +784,13 @@ def test_build_incremental_summary_empty_compression_still_calls_llm():
     assert "【已有摘要】" in user_prompt
     assert "S1" in user_prompt
     assert "【新增对话】" in user_prompt
+    assert "u3" in user_prompt
     history = builder.history.get_history()
     assert history[-1].role == "summary"
-    assert history[-1].replace == [0]
+    assert history[-1].replace == [0, 1, 2, 3]
     assert _contents(context) == [
         "SYS",
         SUMMARY_CONTENT,
-        "u1",
-        "a2",
-        "u3",
         "a4",
     ]
 
@@ -763,7 +802,7 @@ def test_summary_uses_pruned_keep_view():
         context_truncation_threshold=20,
         context_truncation_head_chars=10,
         context_truncation_tail_chars=5,
-        context_summary_keep_rounds=1,
+        context_summary_keep_rounds=2,
     )
     builder.history.append(Message("u0", "user"))
     builder.history.append(Message("a1", "assistant"))
@@ -779,7 +818,6 @@ def test_summary_uses_pruned_keep_view():
     assert _contents(context) == [
         "SYS",
         SUMMARY_CONTENT,
-        "u2",
         "a3",
         "H" * 10
         + "\n"
@@ -788,6 +826,7 @@ def test_summary_uses_pruned_keep_view():
         + "T" * 5,
         "a5",
     ]
+    assert builder.history.get_history()[-1].replace == [0, 1, 2]
     assert builder.history.get_history()[4].content == original
 
 
@@ -841,19 +880,24 @@ def test_build_returns_a_new_list_each_call():
     ]
 
 
-def test_estimate_message_tokens_uses_rendered_characters_over_four():
-    builder = _builder()
-    message = Message("x" * 400, "user")
+def _token_builder(**overrides) -> ContextBuilder:
+    config = {
+        "context_summary_enabled": True,
+        "context_window": 100,
+        "compression_threshold": 0.5,
+        "context_summary_keep_rounds": 2,
+    }
+    config.update(overrides)
+    return ContextBuilder(HistoryManager(), Config(**config))
 
-    # "[user] " (7 字符) + 400 字符 = 407；407 // 4 = 101。
-    assert builder.estimate_message_tokens(message) == 101
+
+def _anchor_view(builder: ContextBuilder, prompt_tokens: int = 0) -> None:
+    builder.build()
+    builder.record_prompt_tokens(prompt_tokens)
 
 
 def test_should_summarize_uses_measured_tokens_strictly():
-    builder = ContextBuilder(
-        HistoryManager(),
-        Config(context_window=100, compression_threshold=0.5),
-    )
+    builder = _token_builder()
     builder.history.append(Message("u", "user"))
 
     builder.record_prompt_tokens(50)
@@ -863,23 +907,150 @@ def test_should_summarize_uses_measured_tokens_strictly():
     assert builder.should_summarize() is True
 
 
-def test_should_summarize_counts_unmeasured_tail():
-    builder = ContextBuilder(
-        HistoryManager(),
-        Config(context_window=100, compression_threshold=0.5),
+@pytest.mark.parametrize(
+    "length,expected",
+    [
+        (169, False),
+        (170, True),
+    ],
+)
+def test_character_threshold_is_strict_and_triggers_on_its_own(length, expected):
+    builder = _token_builder()
+    builder.history.append(Message("u0", "user"))
+    _anchor_view(builder)
+    builder.history.append(Message("x" * length, "user"))
+
+    assert builder.should_summarize() is expected
+
+
+@pytest.mark.parametrize(
+    "length,expected",
+    [
+        (123, False),
+        (124, True),
+    ],
+)
+def test_utf8_byte_threshold_is_strict_and_triggers_on_its_own(length, expected):
+    builder = _token_builder()
+    builder.history.append(Message("u0", "user"))
+    _anchor_view(builder)
+    builder.history.append(Message("中" * length, "user"))
+
+    assert builder.should_summarize() is expected
+
+
+@pytest.mark.parametrize(
+    "length,expected",
+    [
+        (89, False),
+        (90, True),
+    ],
+)
+def test_anchor_plus_tail_character_estimate_triggers_strictly(length, expected):
+    builder = _token_builder()
+    builder.history.append(Message("u0", "user"))
+    _anchor_view(builder, prompt_tokens=20)
+    builder.history.append(Message("x" * length, "user"))
+
+    assert builder.should_summarize() is expected
+
+
+@pytest.mark.parametrize(
+    "length,expected",
+    [
+        (109, False),
+        (110, True),
+    ],
+)
+def test_anchor_plus_tail_utf8_byte_estimate_triggers_strictly(length, expected):
+    builder = _token_builder()
+    builder.history.append(Message("u0", "user"))
+    _anchor_view(builder, prompt_tokens=10)
+    builder.history.append(Message("中" * length, "user"))
+
+    assert builder.should_summarize() is expected
+
+
+def test_tool_call_arguments_enter_estimation():
+    builder = _token_builder()
+    builder.history.append(Message("u0", "user"))
+    _anchor_view(builder)
+    tool_calls = [
+        {
+            "id": "c1",
+            "type": "function",
+            "function": {"name": "Bash", "arguments": "x" * 170},
+        }
+    ]
+    builder.history.append(Message("", "assistant", tool_calls=tool_calls))
+
+    assert builder.should_summarize() is True
+
+
+def test_extra_messages_enter_estimation():
+    builder = _token_builder()
+    builder.history.append(Message("u0", "user"))
+    _anchor_view(builder)
+
+    assert (
+        builder.should_summarize(extra_messages=[{"role": "user", "content": "x" * 169}])
+        is False
     )
-    builder.history.append(Message("u", "user"))
-    builder.record_prompt_tokens(10)
-    builder.history.append(Message("x" * 400, "user"))
+    assert (
+        builder.should_summarize(extra_messages=[{"role": "user", "content": "x" * 170}])
+        is True
+    )
+
+
+def test_masked_messages_are_not_reestimated():
+    masked = _token_builder()
+    masked.history.append(Message("u0", "user"))
+    _anchor_view(masked, prompt_tokens=10)
+    masked.history.append(Message("x" * 3000, "user"))
+    masked.history.append(Message("S", "summary", replace=[1]))
+
+    assert masked.should_summarize() is False
+
+    unmasked = _token_builder()
+    unmasked.history.append(Message("u0", "user"))
+    _anchor_view(unmasked, prompt_tokens=10)
+    unmasked.history.append(Message("x" * 3000, "user"))
+    unmasked.history.append(Message("S", "summary", replace=[]))
+
+    assert unmasked.should_summarize() is True
+
+
+def test_estimation_uses_pruned_tool_view():
+    pruned = _token_builder(
+        context_truncation_enabled=True,
+        context_truncation_rounds=0,
+        context_truncation_threshold=10,
+        context_truncation_head_chars=5,
+        context_truncation_tail_chars=5,
+    )
+    pruned.history.append(Message("u0", "user"))
+    _anchor_view(pruned)
+    pruned.history.append(Message("x" * 3000, "tool", tool_call_id="c1"))
+
+    assert pruned.should_summarize() is False
+
+    raw = _token_builder()
+    raw.history.append(Message("u0", "user"))
+    _anchor_view(raw)
+    raw.history.append(Message("x" * 3000, "tool", tool_call_id="c1"))
+
+    assert raw.should_summarize() is True
+
+
+def test_without_anchor_estimates_the_whole_view():
+    builder = _token_builder()
+    builder.history.append(Message("x" * 170, "user"))
 
     assert builder.should_summarize() is True
 
 
 def test_clear_resets_measured_tokens():
-    builder = ContextBuilder(
-        HistoryManager(),
-        Config(context_window=100, compression_threshold=0.5),
-    )
+    builder = _token_builder()
     builder.record_prompt_tokens(60)
     assert builder.should_summarize() is True
 
@@ -888,14 +1059,49 @@ def test_clear_resets_measured_tokens():
     assert builder.should_summarize() is False
 
 
+def test_clear_reestimates_whole_view_after_anchor():
+    builder = _token_builder()
+    builder.history.append(Message("u0", "user"))
+    _anchor_view(builder, prompt_tokens=45)
+    assert builder.should_summarize() is False
+
+    builder.history.clear()
+    builder.history.append(Message("x" * 169, "user"))
+    assert builder.should_summarize() is False
+
+    builder.history.append(Message("u1", "user"))
+    assert builder.should_summarize() is True
+
+
 def test_load_resets_measured_tokens():
-    builder = ContextBuilder(
-        HistoryManager(),
-        Config(context_window=100, compression_threshold=0.5),
-    )
+    builder = _token_builder()
     builder.record_prompt_tokens(60)
     assert builder.should_summarize() is True
 
     builder.history.load_from_dict({"history": [], "next_id": 0})
 
     assert builder.should_summarize() is False
+
+
+def test_load_reestimates_whole_view_after_anchor():
+    builder = _token_builder()
+    builder.history.append(Message("u0", "user"))
+    _anchor_view(builder, prompt_tokens=45)
+    assert builder.should_summarize() is False
+
+    builder.history.load_from_dict(
+        {
+            "history": [
+                {"role": "user", "content": "x" * 3000, "id": 0},
+                {"role": "summary", "content": "S", "id": 1, "replace": [0]},
+                {"role": "user", "content": "x" * 100, "id": 2},
+            ],
+            "next_id": 3,
+        }
+    )
+    assert builder.should_summarize() is False
+
+    builder.history.load_from_dict(
+        {"history": [{"role": "user", "content": "x" * 170, "id": 0}], "next_id": 1}
+    )
+    assert builder.should_summarize() is True

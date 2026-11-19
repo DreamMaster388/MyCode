@@ -228,11 +228,11 @@ def test_summary_usage_is_included_in_run_budget():
     events, meta = _run(agent)
 
     assert events[-1].data["status"] == "budget"
-    assert llm.summary_calls == 1
+    assert llm.summary_calls == 2
     assert llm.conclude_calls == 1
-    assert meta["input_tokens"] == 25
+    assert meta["input_tokens"] == 35
     assert meta["output_tokens"] == 2
-    assert meta["total_tokens"] == 27
+    assert meta["total_tokens"] == 37
     assert meta["total_steps"] == 1
 
 
@@ -251,12 +251,13 @@ def test_summary_usage_from_conclude_build_is_counted():
     events, meta = _run(agent)
 
     assert events[-1].data["status"] == "max_steps"
-    assert llm.summary_calls == 1
+    assert llm.summary_calls == 2
     assert llm.conclude_calls == 1
-    assert meta["input_tokens"] == 63
-    assert meta["output_tokens"] == 5
-    assert meta["total_tokens"] == 68
+    assert meta["input_tokens"] == 70
+    assert meta["output_tokens"] == 8
+    assert meta["total_tokens"] == 78
     assert meta["total_steps"] == 1
     summary_events = [event for event in recorder.events if event[0] == "summary"]
-    assert len(summary_events) == 1
+    assert len(summary_events) == 2
     assert summary_events[0][1]["mode"] == "normal"
+    assert summary_events[1][1]["mode"] == "incremental"
