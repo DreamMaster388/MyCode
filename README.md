@@ -70,7 +70,7 @@ SWE-bench Lite 300 实例，`DeepSeek-V4.1-Flash-1017`，禁网容器：
 - 工具通过统一注册表暴露 Schema，模型按 Function Calling 协议调用；
 - 系统提示词要求“优先专用工具、仅在必要时使用 Bash”，减少用 `cat`/`sed` 模拟文件操作带来的不可控性。
 
-工具结果全文写回历史，供审计与后续召回；发送前由 pruner 按轮次和字符阈值做视图级裁剪，不再落盘，避免模型只看到预览、排查依赖额外文件。
+工具结果全文写回历史，供审计与后续召回；发送前由 pruner 按字符阈值对所有工具消息统一做视图级中间裁剪（保留头尾、中间替换为指路 marker），不再落盘，避免模型只看到预览、排查依赖额外文件。
 
 **命令体系**
 
@@ -151,7 +151,7 @@ Bash 不进入逐次审批，因为每次执行都弹窗会失去交互价值；
 - **Token 计量**：builder 以最近一次主循环成功请求的真实 `prompt_tokens` 与该次实际发送视图的最大消息 id 为锚点（`clear`/`load` 后清空），仅对锚点之后在实际视图（裁剪、摘要遮蔽后）中新增的消息及本次 `extra_messages` 按实际发送 payload JSON 做字符数（`ceil(字符数 / 4)`）和 UTF-8 字节数（`ceil(字节数 / 4)`）双估算，不引入 tokenizer；
 - **上下文治理模块**：截断、摘要、历史召回分别由三个开关控制，默认全关；前两者在 builder 中生效，召回在开关打开时注册 `Recall` 工具给模型。三开关全关时，直接发送历史并丢弃 summary 消息，不做溢出检查；
 - **摘要**：开启后按双阈值触发（`锚点 + 字符估算 > context_window × compression_threshold` 或 `锚点 + UTF-8 字节估算 > context_window`）；先在裁剪视图上按摘要的 `replace` 遮蔽消息并把摘要前插，再按可见 assistant 轮数 `A` 切分选区——`A < 2` 时跳过摘要并原样返回视图；`A ≥ 2` 时保留 `keep = min(context_summary_keep_rounds, A - 1)` 轮（默认 `context_summary_keep_rounds=10`），严格从倒数第 `keep` 条 assistant 开始划分保留区（不回退到 user），`A ≤ 配置值` 或保留区自身仍超阈值时按每次 build 逐轮让出最旧 1 轮，把边界之前的非空压缩区（有旧摘要时连同旧摘要）交给主 LLM 生成结构化摘要——无旧摘要走普通摘要，有旧摘要走增量摘要。摘要使用中文八个小节（当前任务 / 项目背景 / 已完成工作 / 当前实现状态 / 技术决策 / 问题与风险 / 待办事项 / 用户偏好与约束），关键点用 `[id=N]` 标注来源；输入按选区原样渲染，不额外裁剪；模型异常或返回空时降级为只保留 role/id 的占位摘要。`replace` 记录本次直接遮蔽的消息 id 完整列表。摘要调用的 usage 计入本次 run 的输入/输出/缓存/总 tokens 与 `max_run_tokens` 预算；`total_steps` 与评测请求次数不变。已知限制：`A = 1` 且仍超阈值时跳过摘要，可能超窗；裁剪/摘要缩小锚点范围内旧消息时，到下一次真实 usage 前会短暂高估；无锚点时 `system`/tool schema 未计入估算；字符阈值对中文仍偏低，依赖字节硬阈值兜底；增量降级会保留旧摘要并累积 role/id 行；输入超窗失败即降级；不校验输出格式与引用；
-- **工具输出**：工具结果全文进入历史、不落盘；发送前由 pruner 对最近轮内的超长工具输出保留头尾、对更早轮次整体替换为 marker，且只在结果更短时替换，history 原文不变；
+- **工具输出**：工具结果全文进入历史、不落盘；发送前由 pruner 对所有超长工具输出统一保留头尾、中间替换为 marker，且只在结果更短时替换，history 原文不变；单条消息的裁剪形态只取决于自身内容与历史下标，会话增长时已发送前缀保持稳定，以提升缓存命中率；
 - **可观测性**：每轮模型输出、工具调用与结果，以及摘要调用（模式、降级、usage、耗时、内容）写入 trace，便于复盘失败路径和摘要成本。
 
 这套机制的目标不是“塞进更多内容”，而是在有限预算内保留最有用的信息。
@@ -334,7 +334,7 @@ python -m pytest test/
 | `agents/core/message.py` | 增加历史 id、`tool_call_id`、`tool_calls`、摘要 `replace` 完整 id 列表，以及 LLM 字典互转 |
 | `agents/context/history.py` | 重构为只追加历史存储；token 计量迁到 builder，摘要/上下文组装迁出 |
 | `agents/context/builder.py` | 重写为 `ContextBuilder`：上下文组装、token 计量、截断与摘要编排；召回改由 `Recall` 工具承担 |
-| `agents/context/pruner.py` | 裁剪模块：按轮次和字符阈值裁剪工具消息，不改写 history |
+| `agents/context/pruner.py` | 裁剪模块：对所有工具消息统一做中间裁剪，不改写 history |
 | `agents/context/summary.py` | 摘要模块：遮蔽、选区、普通/增量摘要 prompt、主 LLM 调用与降级 |
 | `agents/context/truncator.py` | 删除；工具结果全文进入历史 |
 | `agents/context/token_counter.py` | 删除；Token 计量职责已迁入 `ContextBuilder` |
