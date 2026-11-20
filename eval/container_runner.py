@@ -36,6 +36,11 @@ SYSTEM_PROMPT = (
     "Run the relevant tests with Bash to verify your fix and iterate until they pass. "
     "Make the minimal change that resolves the issue and do not break existing behavior. "
     "When finished, briefly state what you changed.\n\n"
+    "Context recall: to keep the context small, long tool outputs are middle-truncated and replaced "
+    "by a marker such as `已裁剪，详情参见记忆2中偏移1500，长度5000`. The complete original output "
+    "is still stored in history. When a truncation marker hides information you need, call the "
+    "`Recall` tool with `id=<i>` to read the whole message, or with `id=<i>, offset=<X>, length=<Y>` "
+    "to read the omitted slice.\n\n"
     "Environment constraints (strictly follow them):\n"
     "1. This container has NO network access. Any command that needs the network will fail.\n"
     "2. Do NOT install, upgrade, or compile dependencies (e.g. no pip/conda/apt installs, no building from source). "
@@ -124,6 +129,8 @@ def build_agent(sandbox: DockerSandbox, max_steps: int = 50) -> InstrumentedCode
         subagent_enabled=False,
         todowrite_enabled=False,
         devlog_enabled=False,
+        context_truncation_enabled=True,
+        context_recall_enabled=True,
     )
     return InstrumentedCodeAgent(
         name="EvalCodingAgent",

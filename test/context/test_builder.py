@@ -334,7 +334,7 @@ def test_pruner_wraps_long_tool_content_with_newlines():
     builder = _pruning_builder()
     builder.history.append(Message("u", "user"))
     builder.history.append(Message("a", "assistant"))
-    original = "H" * 10 + "M" * 35 + "T" * 5
+    original = "H" * 10 + "M" * 80 + "T" * 5
     builder.history.append(Message(original, "tool", tool_call_id="c1"))
 
     context = builder.build("SYS")
@@ -342,7 +342,7 @@ def test_pruner_wraps_long_tool_content_with_newlines():
     expected = (
         "H" * 10
         + "\n"
-        + "已裁剪，详情参见记忆2中偏移10，长度35"
+        + "已裁剪，详情参见记忆2中偏移10，长度80；完整内容可通过调用Recall工具查看"
         + "\n"
         + "T" * 5
     )
@@ -355,7 +355,7 @@ def test_pruner_output_is_stable_as_history_grows():
     builder = _pruning_builder()
     builder.history.append(Message("u", "user"))
     builder.history.append(Message("a1", "assistant"))
-    original = "H" * 10 + "M" * 35 + "T" * 5
+    original = "H" * 10 + "M" * 80 + "T" * 5
     builder.history.append(Message(original, "tool", tool_call_id="c1"))
 
     first = builder.build()
@@ -372,11 +372,11 @@ def test_pruner_applies_same_rule_to_all_tool_messages():
     builder = _pruning_builder()
     builder.history.append(Message("u", "user"))
     builder.history.append(Message("a1", "assistant"))
-    early = "H" * 10 + "M" * 35 + "T" * 5
+    early = "H" * 10 + "M" * 80 + "T" * 5
     builder.history.append(Message(early, "tool", tool_call_id="c1"))
     builder.history.append(Message("a2", "assistant"))
     builder.history.append(Message("a3", "assistant"))
-    late = "H" * 10 + "M" * 35 + "T" * 5
+    late = "H" * 10 + "M" * 80 + "T" * 5
     builder.history.append(Message(late, "tool", tool_call_id="c2"))
 
     context = builder.build()
@@ -389,8 +389,8 @@ def test_pruner_applies_same_rule_to_all_tool_messages():
     assert early_content.endswith("\n" + "T" * 5)
     assert late_content.endswith("\n" + "T" * 5)
     assert len(early_content) == len(late_content)
-    assert "已裁剪，详情参见记忆2中偏移10，长度35" in early_content
-    assert "已裁剪，详情参见记忆5中偏移10，长度35" in late_content
+    assert "已裁剪，详情参见记忆2中偏移10，长度80；完整内容可通过调用Recall工具查看" in early_content
+    assert "已裁剪，详情参见记忆5中偏移10，长度80；完整内容可通过调用Recall工具查看" in late_content
 
 
 def test_pruner_keeps_content_when_candidate_would_grow():
@@ -409,7 +409,7 @@ def test_pruner_middle_truncates_old_tool_content():
     builder = _pruning_builder()
     builder.history.append(Message("u", "user"))
     builder.history.append(Message("a1", "assistant"))
-    original = "H" * 10 + "M" * 35 + "T" * 5
+    original = "H" * 10 + "M" * 80 + "T" * 5
     builder.history.append(Message(original, "tool", tool_call_id="c1"))
     builder.history.append(Message("a2", "assistant"))
     builder.history.append(Message("a3", "assistant"))
@@ -419,7 +419,7 @@ def test_pruner_middle_truncates_old_tool_content():
     expected = (
         "H" * 10
         + "\n"
-        + "已裁剪，详情参见记忆2中偏移10，长度35"
+        + "已裁剪，详情参见记忆2中偏移10，长度80；完整内容可通过调用Recall工具查看"
         + "\n"
         + "T" * 5
     )
@@ -444,7 +444,7 @@ def test_pruner_tail_zero_keeps_trailing_newline():
     builder = _pruning_builder(context_truncation_tail_chars=0)
     builder.history.append(Message("u", "user"))
     builder.history.append(Message("a", "assistant"))
-    original = "H" * 10 + "M" * 40
+    original = "H" * 10 + "M" * 80
     builder.history.append(Message(original, "tool", tool_call_id="c1"))
 
     context = builder.build()
@@ -452,7 +452,7 @@ def test_pruner_tail_zero_keeps_trailing_newline():
     expected = (
         "H" * 10
         + "\n"
-        + "已裁剪，详情参见记忆2中偏移10，长度40"
+        + "已裁剪，详情参见记忆2中偏移10，长度80；完整内容可通过调用Recall工具查看"
         + "\n"
     )
     assert context[-1]["content"] == expected
@@ -463,7 +463,7 @@ def test_pruner_marker_index_includes_summary_before_dropping_it():
     builder.history.append(Message("u", "user"))
     builder.history.append(Message("S", "summary", replace=[0]))
     builder.history.append(Message("a", "assistant"))
-    original = "H" * 10 + "M" * 35 + "T" * 5
+    original = "H" * 10 + "M" * 80 + "T" * 5
     builder.history.append(Message(original, "tool", tool_call_id="c1"))
 
     context = builder.build()
@@ -471,7 +471,7 @@ def test_pruner_marker_index_includes_summary_before_dropping_it():
     expected = (
         "H" * 10
         + "\n"
-        + "已裁剪，详情参见记忆3中偏移10，长度35"
+        + "已裁剪，详情参见记忆3中偏移10，长度80；完整内容可通过调用Recall工具查看"
         + "\n"
         + "T" * 5
     )
@@ -483,7 +483,7 @@ def test_pruner_does_not_touch_non_tool_messages():
     builder = _pruning_builder(context_summary_enabled=True)
     builder.history.append(Message("U" * 50, "user"))
     builder.history.append(Message("A" * 50, "assistant"))
-    original = "H" * 10 + "M" * 35 + "T" * 5
+    original = "H" * 10 + "M" * 80 + "T" * 5
     builder.history.append(Message(original, "tool", tool_call_id="c1"))
     builder.history.append(Message("S" * 50, "summary", replace=[]))
 
@@ -492,7 +492,7 @@ def test_pruner_does_not_touch_non_tool_messages():
     expected_tool = (
         "H" * 10
         + "\n"
-        + "已裁剪，详情参见记忆2中偏移10，长度35"
+        + "已裁剪，详情参见记忆2中偏移10，长度80；完整内容可通过调用Recall工具查看"
         + "\n"
         + "T" * 5
     )
@@ -506,7 +506,7 @@ def test_pruner_runs_before_masking_and_marker_uses_history_index():
     builder = _pruning_builder(context_summary_enabled=True)
     builder.history.append(Message("u", "user"))
     builder.history.append(Message("a1", "assistant"))
-    original = "H" * 10 + "M" * 35 + "T" * 5
+    original = "H" * 10 + "M" * 80 + "T" * 5
     builder.history.append(Message(original, "tool", tool_call_id="c1"))
     builder.history.append(Message("a2", "assistant"))
     builder.history.append(Message("a3", "assistant"))
@@ -520,7 +520,7 @@ def test_pruner_runs_before_masking_and_marker_uses_history_index():
         "S",
         "H" * 10
         + "\n"
-        + "已裁剪，详情参见记忆2中偏移10，长度35"
+        + "已裁剪，详情参见记忆2中偏移10，长度80；完整内容可通过调用Recall工具查看"
         + "\n"
         + "T" * 5,
         "a2",
@@ -831,7 +831,7 @@ def test_summary_uses_pruned_keep_view():
     builder.history.append(Message("a1", "assistant"))
     builder.history.append(Message("u2", "user"))
     builder.history.append(Message("a3", "assistant"))
-    original = "H" * 10 + "M" * 35 + "T" * 5
+    original = "H" * 10 + "M" * 80 + "T" * 5
     builder.history.append(Message(original, "tool", tool_call_id="c1"))
     builder.history.append(Message("a5", "assistant"))
     builder.record_prompt_tokens(51)
@@ -844,7 +844,7 @@ def test_summary_uses_pruned_keep_view():
         "a3",
         "H" * 10
         + "\n"
-        + "已裁剪，详情参见记忆4中偏移10，长度35"
+        + "已裁剪，详情参见记忆4中偏移10，长度80；完整内容可通过调用Recall工具查看"
         + "\n"
         + "T" * 5,
         "a5",

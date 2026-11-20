@@ -44,7 +44,10 @@ class ContextPruner:
         head = self.config.context_truncation_head_chars
         tail = self.config.context_truncation_tail_chars
         removed = len(content) - head - tail
-        marker = f"已裁剪，详情参见记忆{index}中偏移{head}，长度{removed}"
+        marker = (
+            f"已裁剪，详情参见记忆{index}中偏移{head}，长度{removed}"
+            "；完整内容可通过调用Recall工具查看"
+        )
         tail_text = content[-tail:] if tail > 0 else ""
         candidate = content[:head] + "\n" + marker + "\n" + tail_text
 
