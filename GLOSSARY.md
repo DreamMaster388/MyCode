@@ -24,7 +24,7 @@
 
 ## 截断模块（pruner）
 
-三个上下文治理模块之一，对应开关 `context_truncation_enabled`，实现载体是 `pruner.py`；按“轮”和字符数裁剪 `role="tool"` 消息的 content，用指向“记忆 i”的 marker 替代被裁部分，不改写 history，且只在替换结果严格短于原文时替换。
+三个上下文治理模块之一，对应开关 `context_truncation_enabled`，实现载体是 `pruner.py`；按字符阈值对所有 `role="tool"` 消息的 content 做统一的中间裁剪：保留头尾，中间用指向“记忆 i”的 marker 替代，不改写 history，且只在替换结果严格短于原文时替换。不区分最近轮与旧消息，单条消息的裁剪形态只取决于自身内容与历史下标，避免会话增长时已发送前缀变化、降低缓存命中率。
 
 避免使用：旧 `ObservationTruncator` 的“截断”（预览+落盘，已删除）。
 

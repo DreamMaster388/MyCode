@@ -21,7 +21,6 @@ class Config(BaseModel):
     context_window: int = 128000  # 上下文窗口大小（tokens）
     compression_threshold: float = 0.8  # 压缩阈值（0.8 = 80%时触发压缩）
     context_truncation_enabled: bool = False  # 是否启用上下文裁剪
-    context_truncation_rounds: int = 10  # 最近多少轮内保留头尾
     context_truncation_threshold: int = 2000  # 触发裁剪的字符数下界
     context_truncation_head_chars: int = 1500  # 保留开头字符数
     context_truncation_tail_chars: int = 500  # 保留结尾字符数
@@ -33,14 +32,12 @@ class Config(BaseModel):
     def _fallback_invalid_truncation_config(self) -> "Config":
         """裁剪参数非法时整组回退默认值，不中断 Config 创建。"""
         if (
-            self.context_truncation_rounds < 0
-            or self.context_truncation_threshold <= 0
+            self.context_truncation_threshold <= 0
             or self.context_truncation_head_chars < 0
             or self.context_truncation_tail_chars < 0
             or self.context_truncation_head_chars + self.context_truncation_tail_chars
             > self.context_truncation_threshold
         ):
-            self.context_truncation_rounds = 10
             self.context_truncation_threshold = 2000
             self.context_truncation_head_chars = 1500
             self.context_truncation_tail_chars = 500
